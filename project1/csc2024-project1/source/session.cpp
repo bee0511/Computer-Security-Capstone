@@ -15,7 +15,7 @@
 #include <utility>
 
 // #define DUMP_PACKET 1
-#define SHOW_ENCAPSULATE 1
+// #define SHOW_ENCAPSULATE 1
 
 extern bool running;
 using namespace std;
@@ -114,10 +114,9 @@ void Session::dissectIPv4(std::span<uint8_t> buffer) {
 #endif
   } else {
     state.recvPacket = false;
+    // Track current IP id
+    state.ipId = hdr.id;
   }
-
-  // Track current IP id
-  state.ipId = ntohs(hdr.id);
 
   auto payload = buffer.last(buffer.size() - hdrlen);
   if (hdr.protocol == IPPROTO_ESP) dissectESP(payload);
@@ -190,6 +189,7 @@ void Session::dissectTCP(std::span<uint8_t> buffer) {
   if (state.recvPacket) {
     std::cout << "Secret: " << std::string(payload.begin(), payload.end()) << std::endl;
     state.sendAck = true;
+    state.espseq++;
   }
 }
 
@@ -231,9 +231,9 @@ int Session::encapsulateIPv4(std::span<uint8_t> buffer, const std::string& paylo
   hdr.version = 4;
   hdr.ihl = 5;
   hdr.ttl = 64;
-  hdr.id = state.ipId;
+  hdr.id = ntohs(ntohs(state.ipId) + 1);
   hdr.protocol = IPPROTO_ESP;
-  hdr.frag_off = 0;
+  hdr.frag_off = htons(0x4000);
   hdr.saddr = inet_addr(config.local.c_str());
   hdr.daddr = inet_addr(config.remote.c_str());
 
@@ -289,7 +289,7 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
 
   if (!config.aalg->empty()) {
     // TODO: Fill in config.aalg->hash()'s parameter
-    auto result = config.aalg->hash(buffer);
+    auto result = config.aalg->hash(buffer.first(payloadLength));
     std::copy(result.begin(), result.end(), buffer.begin() + payloadLength);
     payloadLength += result.size();
   }
