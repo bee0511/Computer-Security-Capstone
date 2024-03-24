@@ -38,6 +38,9 @@ private:
   int encapsulateESP(std::span<uint8_t> buffer, const std::string& payload);
   int encapsulateTCP(std::span<uint8_t> buffer, const std::string& payload);
 
+  uint16_t cal_ipv4_cksm(struct iphdr iphdr);
+  uint16_t cal_tcp_cksm(struct tcphdr tcphdr, const std::string& payload);
+
   int sock;
   sockaddr_ll addr;
   socklen_t addrLen;

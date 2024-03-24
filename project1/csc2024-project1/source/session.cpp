@@ -1,5 +1,6 @@
 #include "session.h"
 
+#include <arpa/inet.h>  // for inet_addr and htons
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <netinet/ip.h>
@@ -8,20 +9,24 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <iostream>
 #include <span>
 #include <utility>
 
-extern bool running;
+// #define DUMP_PACKET 1
+#define SHOW_ENCAPSULATE 1
 
+extern bool running;
+using namespace std;
 Session::Session(const std::string& iface, ESPConfig&& cfg)
     : sock{0}, recvBuffer{}, sendBuffer{}, config{std::move(cfg)}, state{} {
   checkError(sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_ALL)), "Create socket failed");
   // TODO: Setup sockaddr_ll
   sockaddr_ll addr_ll{};
-  // addr_ll.sll_family =
-  // addr_ll.sll_protocol =
-  // addr_ll.sll_ifindex =
+  addr_ll.sll_family = AF_PACKET;
+  addr_ll.sll_protocol = htons(ETH_P_ALL);
+  addr_ll.sll_ifindex = if_nametoindex(iface.c_str());
   checkError(bind(sock, reinterpret_cast<sockaddr*>(&addr_ll), sizeof(sockaddr_ll)), "Bind failed");
 }
 
@@ -73,14 +78,49 @@ void Session::dissect(ssize_t rdcnt) {
 }
 
 void Session::dissectIPv4(std::span<uint8_t> buffer) {
+  if (buffer.size() < sizeof(iphdr)) {
+    std::cerr << "Packet too short for IP header\n";
+    return;
+  }
+
   auto&& hdr = *reinterpret_cast<iphdr*>(buffer.data());
-  // TODO:
+
+  // Set the IP source and destination address
+  char src_ip[INET_ADDRSTRLEN];
+  char dst_ip[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &(hdr.saddr), src_ip, INET_ADDRSTRLEN);
+  inet_ntop(AF_INET, &(hdr.daddr), dst_ip, INET_ADDRSTRLEN);
+
+  // Set the protocol number and payload length
+  auto pro = hdr.protocol;
+  auto hdrlen = hdr.ihl * 4;
+  auto plen = ntohs(hdr.tot_len) - hdrlen;
+
+  std::map<int, std::string> protocol_names = {
+      {IPPROTO_IP, "IP"},   {IPPROTO_ICMP, "ICMP"}, {IPPROTO_TCP, "TCP"},
+      {IPPROTO_UDP, "UDP"}, {IPPROTO_IPV6, "IPv6"}, {IPPROTO_ESP, "ESP"},
+  };
+
   // Set `recvPacket = true` if we are receiving packet from remote
-  //   state.recvPacket =
+  if (strcmp(dst_ip, config.local.c_str()) == 0) {
+    state.recvPacket = true;
+#if DUMP_PACKET
+    // Dump IP packet
+    std::cout << "-------------dissectIPv4--------------\n";
+    std::cout << "Source IP: " << src_ip << "\n";
+    std::cout << "Destination IP: " << dst_ip << "\n";
+    std::cout << "Protocol: " << protocol_names[pro] << "\n";
+    std::cout << "Payload Length: " << plen << "\n";
+#endif
+  } else {
+    state.recvPacket = false;
+  }
+
   // Track current IP id
-  //   state.ipId = ;
-  // Call dissectESP(payload) if next protocol is ESP
-  //   auto payload = buffer.last(buffer.size() - headerLength);
+  state.ipId = ntohs(hdr.id);
+
+  auto payload = buffer.last(buffer.size() - hdrlen);
+  if (hdr.protocol == IPPROTO_ESP) dissectESP(payload);
 }
 
 void Session::dissectESP(std::span<uint8_t> buffer) {
@@ -94,22 +134,55 @@ void Session::dissectESP(std::span<uint8_t> buffer) {
     data = config.ealg->decrypt(buffer);
     buffer = std::span{data.data(), data.size()};
   }
-
   // TODO:
   // Track ESP sequence number
-  //   state.espseq = ;
+  if (state.recvPacket == false) {
+    state.espseq = ntohl(hdr.seq);
+    config.spi = ntohl(hdr.spi);
+  }
+  // Extract the ESP trailer from the decrypted data
+  auto trailer_buffer = buffer.last(sizeof(ESPTrailer));
+  // Remove the ESP trailer from the buffer
+  buffer = buffer.first(buffer.size() - sizeof(ESPTrailer) - (int)trailer_buffer[0]);
+
+// Dump ESP packet
+#if DUMP_PACKET
+  std::cout << "-------------dissectESP--------------\n";
+  std::cout << "SPI: " << ntohl(hdr.spi) << "\n";
+  std::cout << "Sequence Number: " << ntohl(hdr.seq) << "\n";
+  std::cout << "Padding Length: " << (int)trailer_buffer[0] << "\n";
+  std::cout << "Next Header: " << (int)trailer_buffer[1] << "\n";
+  std::cout << "Payload Length: " << buffer.size() << "\n";
+#endif
+
   // Call dissectTCP(payload) if next protocol is TCP
+  if ((int)trailer_buffer[1] == IPPROTO_TCP) dissectTCP(buffer);
 }
 
 void Session::dissectTCP(std::span<uint8_t> buffer) {
   auto&& hdr = *reinterpret_cast<tcphdr*>(buffer.data());
   auto length = hdr.doff << 2;
   auto payload = buffer.last(buffer.size() - length);
+
+// Dump TCP packet
+#if DUMP_PACKET
+  std::cout << "-------------dissectTCP--------------\n";
+  std::cout << "Source Port: " << ntohs(hdr.source) << "\n";
+  std::cout << "Destination Port: " << ntohs(hdr.dest) << "\n";
+  std::cout << "Sequence Number: " << ntohl(hdr.seq) << "\n";
+  std::cout << "Acknowledge Number: " << ntohl(hdr.ack_seq) << "\n";
+  std::cout << "Data Offset: " << hdr.doff << "\n";
+  std::cout << "Window: " << ntohs(hdr.window) << "\n";
+  std::cout << "Checksum: " << ntohs(hdr.check) << "\n";
+  std::cout << "Urgent Pointer: " << ntohs(hdr.urg_ptr) << "\n";
+  std::cout << "Payload Length: " << payload.size() << "\n";
+  std::cout << "-------------------------------------\n";
+#endif
   // Track tcp parameters
-  // state.tcpseq =
-  // state.tcpackseq =
-  // state.srcPort =
-  // state.dstPort =
+  state.tcpseq = ntohl(hdr.seq);
+  state.tcpackseq = ntohl(hdr.ack_seq);
+  state.srcPort = ntohs(hdr.source);
+  state.dstPort = ntohs(hdr.dest);
 
   // Is ACK message?
   if (payload.empty()) return;
@@ -127,24 +200,60 @@ void Session::encapsulate(const std::string& payload) {
   sendto(sock, sendBuffer, totalLength, 0, reinterpret_cast<sockaddr*>(&addr), addrLen);
 }
 
+uint16_t Session::cal_ipv4_cksm(struct iphdr iphdr) {
+  // [TODO]: Finish IP checksum calculation
+  struct iphdr* temp_ptr = &iphdr;
+  uint16_t* iphdr_ptr = (uint16_t*)temp_ptr;
+  size_t hdr_len = iphdr.ihl * 4;
+  uint32_t sum = 0;
+
+  // Calculate the chcksum for the IP header
+  while (hdr_len > 1) {
+    sum += *iphdr_ptr++;
+    hdr_len -= 2;
+  }
+
+  // Deal with odd header len
+  if (hdr_len) {
+    sum += (*iphdr_ptr) & htons(0xFF00);
+  }
+
+  while (sum >> 16) {
+    sum = (sum & 0xFFFF) + (sum >> 16);
+  }
+
+  return ~sum;
+}
+
 int Session::encapsulateIPv4(std::span<uint8_t> buffer, const std::string& payload) {
   auto&& hdr = *reinterpret_cast<iphdr*>(buffer.data());
   // TODO: Fill IP header
-  // hdr.version =
-  // hdr.ihl =
-  // hdr.ttl =
-  // hdr.id =
-  // hdr.protocol =
-  // hdr.frag_off =
-  // hdr.saddr =
-  // hdr.daddr =
+  hdr.version = 4;
+  hdr.ihl = 5;
+  hdr.ttl = 64;
+  hdr.id = state.ipId;
+  hdr.protocol = IPPROTO_ESP;
+  hdr.frag_off = 0;
+  hdr.saddr = inet_addr(config.local.c_str());
+  hdr.daddr = inet_addr(config.remote.c_str());
+
   auto nextBuffer = buffer.last(buffer.size() - sizeof(iphdr));
 
   int payloadLength = encapsulateESP(nextBuffer, payload);
   payloadLength += sizeof(iphdr);
+  hdr.tot_len = htons(payloadLength);
+  hdr.check = 0;  // Set hdr.check to 0 before calculating checksum
+  hdr.check = cal_ipv4_cksm(hdr);
 
-  // hdr.tot_len =
-  // hdr.check =
+#if SHOW_ENCAPSULATE
+  std::cout << "-------------encapsulateIPv4--------------\n";
+  std::cout << "Source IP: " << ipToString(hdr.saddr) << "\n";
+  std::cout << "Destination IP: " << ipToString(hdr.daddr) << "\n";
+  std::cout << "Protocol: " << hdr.protocol << "\n";
+  std::cout << "Payload Length: " << payloadLength << "\n";
+  std::cout << "-------------------------------------\n";
+#endif
+
   return payloadLength;
 }
 
@@ -154,16 +263,22 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
   // TODO: Fill ESP header
   // hdr.spi =
   // hdr.seq =
+  hdr.spi = htonl(config.spi);
+  hdr.seq = htonl(state.espseq + 1);
   int payloadLength = encapsulateTCP(nextBuffer, payload);
 
   auto endBuffer = nextBuffer.last(nextBuffer.size() - payloadLength);
   // TODO: Calculate padding size and do padding in `endBuffer`
-  uint8_t padSize = 0;
-  payloadLength += padSize;
+  uint8_t padLength = (4 - ((payloadLength + sizeof(ESPTrailer)) % 4)) % 4;
+
+  std::fill(endBuffer.begin(), endBuffer.begin() + padLength, padLength);
+  payloadLength += padLength;
+
   // ESP trailer
-  // endBuffer[padSize] =
-  // endBuffer[padSize + 1] =
+  endBuffer[padLength] = padLength;
+  endBuffer[padLength + 1] = IPPROTO_TCP;
   payloadLength += sizeof(ESPTrailer);
+
   // Do encryption
   if (!config.ealg->empty()) {
     auto result = config.ealg->encrypt(nextBuffer.first(payloadLength));
@@ -174,34 +289,104 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
 
   if (!config.aalg->empty()) {
     // TODO: Fill in config.aalg->hash()'s parameter
-    // auto result = config.aalg->hash();
-    // std::copy(result.begin(), result.end(), buffer.begin() + payloadLength);
-    // payloadLength += result.size();
+    auto result = config.aalg->hash(buffer);
+    std::copy(result.begin(), result.end(), buffer.begin() + payloadLength);
+    payloadLength += result.size();
   }
+
+#if SHOW_ENCAPSULATE
+  std::cout << "-------------encapsulateESP--------------\n";
+  std::cout << "SPI: " << ntohl(hdr.spi) << "\n";
+  std::cout << "Sequence Number: " << ntohl(hdr.seq) << "\n";
+  std::cout << "Padding Length: " << (int)endBuffer[padLength] << "\n";
+  std::cout << "Next Header: " << (int)endBuffer[padLength + 1] << "\n";
+  std::cout << "Payload Length: " << payloadLength << "\n";
+#endif
+
   return payloadLength;
+}
+
+uint16_t Session::cal_tcp_cksm(struct tcphdr tcphdr, const std::string& payload) {
+  // [TODO]: Finish TCP checksum calculation
+
+  // Calculate the TCP pseudo-header checksum
+  uint32_t ip_src = inet_addr(config.local.c_str());
+  uint32_t ip_dst = inet_addr(config.remote.c_str());
+  uint32_t sum = 0;
+  sum += (ip_src >> 16) & 0xFFFF;
+  sum += ip_src & 0xFFFF;
+  sum += (ip_dst >> 16) & 0xFFFF;
+  sum += ip_dst & 0xFFFF;
+  sum += htons(IPPROTO_TCP);
+  uint16_t tcphdr_len = tcphdr.th_off * 4;
+  uint16_t tcp_len = tcphdr_len + payload.size();
+  sum += htons(tcp_len);
+
+  // Create a buffer to store the TCP header and payload
+  // Then calculate them together in the buffer
+  uint8_t* buf = (uint8_t*)malloc((tcphdr_len + payload.size()) * sizeof(uint8_t));
+  memcpy(buf, &tcphdr, tcphdr_len);
+  memcpy(buf + tcphdr_len, payload.c_str(), payload.size());
+  uint16_t* pl_ptr = (uint16_t*)buf;
+  while (tcp_len > 1) {
+    sum += *pl_ptr++;
+    tcp_len -= 2;
+  }
+
+  // Deal with odd header len
+  if (tcp_len) {
+    sum += (*pl_ptr) & htons(0xFF00);
+  }
+
+  while (sum >> 16) {
+    sum = (sum & 0xFFFF) + (sum >> 16);
+  }
+
+  // Take the one's complement of the sum to get the final checksum
+  return ~sum;
 }
 
 int Session::encapsulateTCP(std::span<uint8_t> buffer, const std::string& payload) {
   auto&& hdr = *reinterpret_cast<tcphdr*>(buffer.data());
   if (!payload.empty()) hdr.psh = 1;
   // TODO: Fill TCP header
-  // hdr.ack =
-  // hdr.doff =
-  // hdr.dest =
-  // hdr.source =
-  // hdr.ack_seq =
-  // hdr.seq =
-  // hdr.window =
+  hdr.ack = 1;
+  hdr.doff = 5;
+  hdr.dest = htons(state.srcPort);
+  hdr.source = htons(state.dstPort);
+  hdr.ack_seq = htonl(state.tcpseq);
+  hdr.seq = htonl(state.tcpackseq);
+
+  hdr.window = htons(502);
   auto nextBuffer = buffer.last(buffer.size() - sizeof(tcphdr));
   int payloadLength = 0;
   if (!payload.empty()) {
     std::copy(payload.begin(), payload.end(), nextBuffer.begin());
     payloadLength += payload.size();
   }
-  // TODO: Update TCP sequence number
-  // state.tcpseq =
+  // Update TCP sequence number
+  state.tcpseq += payload.size();
+
   payloadLength += sizeof(tcphdr);
-  // TODO: Compute checksum
-  // hdr.check =
+
+  // Compute checksum
+  hdr.check = 0;  // Set hdr.check to 0 before calculating checksum
+  hdr.check = cal_tcp_cksm(hdr, payload);
+
+#if SHOW_ENCAPSULATE
+  std::cout << "-------------encapsulateTCP--------------\n";
+  std::cout << "Source Port: " << ntohs(hdr.source) << "\n";
+  std::cout << "Destination Port: " << ntohs(hdr.dest) << "\n";
+  std::cout << "Sequence Number: " << ntohl(hdr.seq) << "\n";
+  std::cout << "Acknowledge Number: " << ntohl(hdr.ack_seq) << "\n";
+  std::cout << "Data Offset: " << hdr.doff << "\n";
+  std::cout << "Window: " << ntohs(hdr.window) << "\n";
+  std::cout << "Checksum: " << ntohs(hdr.check) << "\n";
+  std::cout << "Urgent Pointer: " << ntohs(hdr.urg_ptr) << "\n";
+  std::cout << "Payload Length: " << payloadLength << "\n";
+  std::cout << "Payload Content: " << payload << "\n";
+
+#endif
+
   return payloadLength;
 }
