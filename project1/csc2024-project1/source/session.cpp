@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <numeric>
 #include <span>
 #include <utility>
 
@@ -179,6 +180,7 @@ void Session::dissectTCP(std::span<uint8_t> buffer) {
 #endif
   // Track tcp parameters
   state.tcpseq = ntohl(hdr.seq);
+  state.tcpseq += payload.size();
   state.tcpackseq = ntohl(hdr.ack_seq);
   state.srcPort = ntohs(hdr.source);
   state.dstPort = ntohs(hdr.dest);
@@ -190,6 +192,7 @@ void Session::dissectTCP(std::span<uint8_t> buffer) {
     std::cout << "Secret: " << std::string(payload.begin(), payload.end()) << std::endl;
     state.sendAck = true;
     state.espseq++;
+    state.ipId++;
   }
 }
 
@@ -207,7 +210,7 @@ uint16_t Session::cal_ipv4_cksm(struct iphdr iphdr) {
   size_t hdr_len = iphdr.ihl * 4;
   uint32_t sum = 0;
 
-  // Calculate the chcksum for the IP header
+  // Calculate the checksum for the IP header
   while (hdr_len > 1) {
     sum += *iphdr_ptr++;
     hdr_len -= 2;
@@ -268,10 +271,13 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
   int payloadLength = encapsulateTCP(nextBuffer, payload);
 
   auto endBuffer = nextBuffer.last(nextBuffer.size() - payloadLength);
-  // TODO: Calculate padding size and do padding in `endBuffer`
+  // Calculate padding size
   uint8_t padLength = (4 - ((payloadLength + sizeof(ESPTrailer)) % 4)) % 4;
 
-  std::fill(endBuffer.begin(), endBuffer.begin() + padLength, padLength);
+  // Fill the padding with a monotonically increasing sequence starting from 1
+  std::iota(endBuffer.begin(), endBuffer.begin() + padLength, 1);
+
+  // Update the payload length
   payloadLength += padLength;
 
   // ESP trailer
