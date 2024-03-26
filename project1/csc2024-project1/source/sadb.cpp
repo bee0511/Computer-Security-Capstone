@@ -23,14 +23,22 @@ std::optional<ESPConfig> getConfigFromSADB() {
   msg.sadb_msg_len = sizeof(msg) / 8;
   msg.sadb_msg_pid = getpid();
 
-  // Create a PF_KEY_V2 socket and send the SADB_DUMP request111
+  // Create a PF_KEY_V2 socket and send the SADB_DUMP request
   int s = socket(PF_KEY, SOCK_RAW, PF_KEY_V2);
+  
+  // The first write and read are used for getting server's SADB
   if (write(s, &msg, sizeof(msg)) < 0) {
     std::cerr << "Failed to write SADB_DUMP request." << std::endl;
     return std::nullopt;
   }
-
   int msglen = read(s, message.data(), message.size());
+
+  // The second write and read are used for getting client's SADB
+  if (write(s, &msg, sizeof(msg)) < 0) {
+    std::cerr << "Failed to write SADB_DUMP request." << std::endl;
+    return std::nullopt;
+  }
+  msglen = read(s, message.data(), message.size());
   close(s);
 
   // Has SADB entry
@@ -44,6 +52,10 @@ std::optional<ESPConfig> getConfigFromSADB() {
     std::span<uint8_t> encrypt_key;
 
     msglen -= sizeof(struct sadb_msg);
+    // Cast the data from the message to a sadb_msg pointer, then increment by one to skip the base header.
+    // This is because the message data begins with a base header of type sadb_msg.
+    // Adding 1 to the pointer advances it by the size of sadb_msg, effectively skipping the base header.
+    // The result is then cast to a sadb_ext pointer, which points to the first extension in the message.
     ext = reinterpret_cast<struct sadb_ext *>(reinterpret_cast<sadb_msg *>(message.data()) + 1);
 
     while (msglen > 0) {
@@ -53,14 +65,22 @@ std::optional<ESPConfig> getConfigFromSADB() {
           break;
         case SADB_EXT_ADDRESS_SRC:
           addr = (struct sadb_address *)ext;
-          config.remote = ipToString(((struct sockaddr_in *)(addr + 1))->sin_addr.s_addr);
+          // Cast the 'addr' pointer to a 'sockaddr_in' pointer, then increment by one to skip the base structure.
+          // This is because the data begins with a base structure of type sockaddr_in.
+          // Adding 1 to the pointer advances it by the size of sockaddr_in, effectively skipping the base structure.
+          // The result is then used to access the 'sin_addr' member of the next sockaddr_in structure in memory.
+          config.local = ipToString(((struct sockaddr_in *)(addr + 1))->sin_addr.s_addr);
           break;
         case SADB_EXT_ADDRESS_DST:
           addr = (struct sadb_address *)ext;
-          config.local = ipToString(((struct sockaddr_in *)(addr + 1))->sin_addr.s_addr);
+          config.remote = ipToString(((struct sockaddr_in *)(addr + 1))->sin_addr.s_addr);
           break;
         case SADB_EXT_KEY_AUTH:
           key = (struct sadb_key *)ext;
+          // Cast the 'key' pointer to a 'sadb_key' pointer, then increment by one to skip the base structure.
+          // This is because the data begins with a base structure of type sadb_key.
+          // Adding 1 to the pointer advances it by the size of sadb_key, effectively skipping the base structure.
+          // The result is then used to create a span of uint8_t that represents the actual key data.
           auth_key = std::span<uint8_t>((uint8_t *)(key + 1), key->sadb_key_bits / 8);
           break;
         case SADB_EXT_KEY_ENCRYPT:
@@ -70,7 +90,11 @@ std::optional<ESPConfig> getConfigFromSADB() {
         default:
           break;
       }
+      // Subtract the length of the current extension (in bytes) from the total message length
       msglen -= ext->sadb_ext_len << 3;
+
+      // Move the pointer to the next extension in the message
+      // The length of an extension is given in 64-bit words, so we shift left by 3 to convert it to bytes
       ext = reinterpret_cast<struct sadb_ext *>(reinterpret_cast<char *>(ext)
                                                 + (ext->sadb_ext_len << 3));
     }

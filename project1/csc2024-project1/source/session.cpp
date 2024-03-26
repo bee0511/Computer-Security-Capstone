@@ -138,11 +138,13 @@ void Session::dissectESP(std::span<uint8_t> buffer) {
   // Track ESP sequence number
   if (state.recvPacket == false) {
     state.espseq = ntohl(hdr.seq);
-    config.spi = ntohl(hdr.spi);
   }
   // Extract the ESP trailer from the decrypted data
   auto trailer_buffer = buffer.last(sizeof(ESPTrailer));
   // Remove the ESP trailer from the buffer
+  // The size of the buffer is reduced by the size of the ESPTrailer and the padding length
+  // The padding length is stored in the first byte of the trailer_buffer and is cast to int for the subtraction operation
+  // Why cast uint8_t to int? Because the uint8_t is unsigned, the subtraction may overflow.
   buffer = buffer.first(buffer.size() - sizeof(ESPTrailer) - (int)trailer_buffer[0]);
 
 // Dump ESP packet
@@ -204,9 +206,7 @@ void Session::encapsulate(const std::string& payload) {
 }
 
 uint16_t Session::cal_ipv4_cksm(struct iphdr iphdr) {
-  // [TODO]: Finish IP checksum calculation
-  struct iphdr* temp_ptr = &iphdr;
-  uint16_t* iphdr_ptr = (uint16_t*)temp_ptr;
+  uint16_t* iphdr_ptr = reinterpret_cast<uint16_t*>(&iphdr);
   size_t hdr_len = iphdr.ihl * 4;
   uint32_t sum = 0;
 
@@ -221,7 +221,8 @@ uint16_t Session::cal_ipv4_cksm(struct iphdr iphdr) {
     sum += (*iphdr_ptr) & htons(0xFF00);
   }
 
-  while (sum >> 16) {
+  // If the sum is greater than 16 bits, add the carry
+  if (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
 
@@ -264,8 +265,6 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
   auto&& hdr = *reinterpret_cast<ESPHeader*>(buffer.data());
   auto nextBuffer = buffer.last(buffer.size() - sizeof(ESPHeader));
   // TODO: Fill ESP header
-  // hdr.spi =
-  // hdr.seq =
   hdr.spi = htonl(config.spi);
   hdr.seq = htonl(state.espseq + 1);
   int payloadLength = encapsulateTCP(nextBuffer, payload);
@@ -295,6 +294,7 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
 
   if (!config.aalg->empty()) {
     // TODO: Fill in config.aalg->hash()'s parameter
+    // parameter: ESP header + ESP payload (TCP header + TCP payload) + ESP trailer (padding and next header)
     auto result = config.aalg->hash(buffer.first(payloadLength));
     std::copy(result.begin(), result.end(), buffer.begin() + payloadLength);
     payloadLength += result.size();
@@ -313,27 +313,35 @@ int Session::encapsulateESP(std::span<uint8_t> buffer, const std::string& payloa
 }
 
 uint16_t Session::cal_tcp_cksm(struct tcphdr tcphdr, const std::string& payload) {
-  // [TODO]: Finish TCP checksum calculation
-
   // Calculate the TCP pseudo-header checksum
+  // Pseudo Header: Source IP + Destination IP + Protocol + L4 Header Length
   uint32_t ip_src = inet_addr(config.local.c_str());
   uint32_t ip_dst = inet_addr(config.remote.c_str());
-  uint32_t sum = 0;
-  sum += (ip_src >> 16) & 0xFFFF;
-  sum += ip_src & 0xFFFF;
-  sum += (ip_dst >> 16) & 0xFFFF;
-  sum += ip_dst & 0xFFFF;
-  sum += htons(IPPROTO_TCP);
   uint16_t tcphdr_len = tcphdr.th_off * 4;
   uint16_t tcp_len = tcphdr_len + payload.size();
+  uint32_t sum = 0;
+
+  sum += (ip_src >> 16) & 0xFFFF;  // High 16 bits of source IP
+  sum += ip_src & 0xFFFF;          // Low 16 bits of source IP
+  sum += (ip_dst >> 16) & 0xFFFF;  // High 16 bits of destination IP
+  sum += ip_dst & 0xFFFF;          // Low 16 bits of destination IP
+  sum += htons(IPPROTO_TCP);
   sum += htons(tcp_len);
 
-  // Create a buffer to store the TCP header and payload
-  // Then calculate them together in the buffer
-  uint8_t* buf = (uint8_t*)malloc((tcphdr_len + payload.size()) * sizeof(uint8_t));
+  // Allocate memory of size equal to the TCP header length plus the payload size
+  uint8_t* buf
+      = reinterpret_cast<uint8_t*>(malloc((tcphdr_len + payload.size()) * sizeof(uint8_t)));
+
+  // Copy the TCP header into the allocated buffer
   memcpy(buf, &tcphdr, tcphdr_len);
+
+  // Copy the payload into the buffer, right after the TCP header
   memcpy(buf + tcphdr_len, payload.c_str(), payload.size());
-  uint16_t* pl_ptr = (uint16_t*)buf;
+
+  // Cast the buffer to a uint16_t pointer for subsequent checksum calculation
+  uint16_t* pl_ptr = reinterpret_cast<uint16_t*>(buf);
+
+  // Calculate the checksum for the TCP header and payload
   while (tcp_len > 1) {
     sum += *pl_ptr++;
     tcp_len -= 2;
@@ -344,7 +352,8 @@ uint16_t Session::cal_tcp_cksm(struct tcphdr tcphdr, const std::string& payload)
     sum += (*pl_ptr) & htons(0xFF00);
   }
 
-  while (sum >> 16) {
+  // If the sum is greater than 16 bits, add the carry
+  if (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
 
@@ -391,7 +400,6 @@ int Session::encapsulateTCP(std::span<uint8_t> buffer, const std::string& payloa
   std::cout << "Urgent Pointer: " << ntohs(hdr.urg_ptr) << "\n";
   std::cout << "Payload Length: " << payloadLength << "\n";
   std::cout << "Payload Content: " << payload << "\n";
-
 #endif
 
   return payloadLength;
