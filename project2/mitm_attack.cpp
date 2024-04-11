@@ -12,6 +12,22 @@ uint8_t *cal_base_ip(uint8_t *ip, sockaddr_in *netmask) {
     return base_ip;
 }
 
+void get_default_gateway(uint8_t gateway_ip[4]) {
+    FILE *fp = fopen("gateway.txt", "r");
+    if (fp == nullptr) {
+        perror("fopen() failed");
+        exit(EXIT_FAILURE);
+    }
+
+    int res = fscanf(fp, "%hhu.%hhu.%hhu.%hhu", &gateway_ip[0], &gateway_ip[1], &gateway_ip[2], &gateway_ip[3]);
+    if (res != 4) {
+        perror("fscanf() failed");
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(fp);
+}
+
 int main(int argc, char **argv) {
     char *interface;
     int i, frame_length, sd, bytes;
@@ -144,19 +160,26 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    uint8_t gateway_ip[4];
+    get_default_gateway(gateway_ip);
+
     for (uint8_t i = base_ip[3] + 1; i < 255; i++) {
+        uint8_t dest_ip[4] = {base_ip[0], base_ip[1], base_ip[2], i};
+
+        // If dest_ip is equal to gateway_ip, skip this iteration
+        if (std::equal(dest_ip, dest_ip + 4, gateway_ip)) {
+            continue;
+        }
+
+        std::copy(dest_ip, dest_ip + 4, arphdr.target_ip);
         // ARP header
         memcpy(ether_frame + ETH_HDRLEN, &arphdr, ARP_HDRLEN * sizeof(uint8_t));
-        uint8_t dest_ip[4] = {base_ip[0], base_ip[1], base_ip[2], i};
-        std::copy(dest_ip, dest_ip + 4, arphdr.target_ip);
-
         // Send ethernet frame to socket.
         if ((bytes = sendto(sd, ether_frame, frame_length, 0, (struct sockaddr *)&device, sizeof(device))) <= 0) {
             perror("sendto() failed");
             exit(EXIT_FAILURE);
         }
     }
-
     // Receive ARP responses
     printf("Available devices:\n");
     printf("-----------------------------\n");
@@ -187,7 +210,6 @@ int main(int argc, char **argv) {
                     printf("%02x:", arphdr->sender_mac[i]);
                 }
                 printf("%02x\n", arphdr->sender_mac[5]);
-
             }
         }
     }

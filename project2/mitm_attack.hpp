@@ -22,6 +22,7 @@
 #include <errno.h>            // errno, perror()
 
 #include <algorithm>
+#include <cstdio>
 
 // Define a struct for ARP header
 typedef struct _arp_hdr arp_hdr;
