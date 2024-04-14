@@ -21,9 +21,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <vector>
+#include <array>
 
-void get_mac_address(const char *interface, uint8_t *src_mac);
+void get_mac_address(const char *interface, std::array<uint8_t, 6> &src_mac);
 void get_netmask(const char *interface, struct sockaddr_in &netmask);
 void get_src_IP(const char *interface, struct sockaddr_in &ipv4);
-void get_default_gateway(uint8_t gateway_ip[4]);
-uint8_t *cal_base_ip(uint8_t *ip, sockaddr_in &netmask);
+void get_default_gateway(uint32_t &gateway_ip);

@@ -8,10 +8,10 @@ struct _arp_hdr {
     uint8_t hlen;
     uint8_t plen;
     uint16_t opcode;
-    uint8_t sender_mac[6];
-    uint8_t sender_ip[4];
-    uint8_t target_mac[6];
-    uint8_t target_ip[4];
+    std::array<uint8_t, 6> sender_mac;
+    std::array<uint8_t, 4> sender_ip;
+    std::array<uint8_t, 6> target_mac;
+    std::array<uint8_t, 4> target_ip;
 };
 
 // Define some constants.

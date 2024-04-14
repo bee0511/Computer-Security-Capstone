@@ -1,26 +1,23 @@
 #include "utils.hpp"
 
-
-uint8_t *cal_base_ip(uint8_t *ip, sockaddr_in &netmask) {
-    // return base ip
-    uint8_t *base_ip = (uint8_t *)malloc(4 * sizeof(uint8_t));
-    uint8_t *mask_addr = (uint8_t *)&netmask.sin_addr.s_addr;
-    for (int i = 0; i < 4; i++) {
-        base_ip[i] = ip[i] & mask_addr[i];
-    }
-    return base_ip;
-}
-
-void get_default_gateway(uint8_t gateway_ip[4]) {
+void get_default_gateway(uint32_t &gateway_ip) {
     FILE *fp = fopen("gateway.txt", "r");
     if (fp == nullptr) {
         perror("fopen() failed");
         exit(EXIT_FAILURE);
     }
 
-    int res = fscanf(fp, "%hhu.%hhu.%hhu.%hhu", &gateway_ip[0], &gateway_ip[1], &gateway_ip[2], &gateway_ip[3]);
-    if (res != 4) {
-        perror("fscanf() failed");
+    char ip_str[16];
+    if (fgets(ip_str, sizeof(ip_str), fp) == nullptr) {
+        perror("fgets() failed");
+        exit(EXIT_FAILURE);
+    }
+    ip_str[strcspn(ip_str, "\n")] = 0;  // Remove newline character
+
+    // printf("Gateway IP: %s\n", ip_str);
+
+    if (inet_pton(AF_INET, ip_str, &gateway_ip) != 1) {
+        perror("inet_pton() failed");
         exit(EXIT_FAILURE);
     }
 
@@ -51,7 +48,7 @@ void get_src_IP(const char *interface, struct sockaddr_in &ipv4) {
     close(sd);
 }
 
-void get_mac_address(const char *interface, uint8_t *src_mac) {
+void get_mac_address(const char *interface, std::array<uint8_t, 6> &src_mac) {
     int sd;
     struct ifreq ifr;
 
@@ -66,13 +63,14 @@ void get_mac_address(const char *interface, uint8_t *src_mac) {
     snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface);
     if (ioctl(sd, SIOCGIFHWADDR, &ifr) < 0) {
         perror("ioctl() failed to get source MAC address");
+        close(sd);
         return;
     }
+
     // Copy source MAC address.
-    memcpy(src_mac, ifr.ifr_hwaddr.sa_data, 6 * sizeof(uint8_t));
+    std::copy(ifr.ifr_hwaddr.sa_data, ifr.ifr_hwaddr.sa_data + 6, src_mac.begin());
 
     close(sd);
-    return;
 }
 
 void get_netmask(const char *interface, struct sockaddr_in &netmask) {
