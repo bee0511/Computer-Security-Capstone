@@ -16,6 +16,7 @@
 #include <netinet/ip_icmp.h>
 #include <net/ethernet.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 
 #include <errno.h>            // errno, perror()
 

