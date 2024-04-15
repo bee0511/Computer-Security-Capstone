@@ -13,6 +13,7 @@
 #include <linux/if_ether.h>   // ETH_P_ARP = 0x0806
 #include <linux/if_packet.h>  // struct sockaddr_ll (see man 7 packet)
 #include <linux/if_arp.h>
+#include <netinet/ip_icmp.h>
 #include <net/ethernet.h>
 #include <arpa/inet.h>
 
@@ -21,7 +22,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <vector>
+#include <map>
 #include <array>
+#include <span>
 #include <chrono>
 #include <thread>
 
