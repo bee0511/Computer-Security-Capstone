@@ -147,7 +147,7 @@ void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8
             }
 
             // Print the username and password
-            printf("Username: ");
+            printf("\nUsername: ");
             for (char *p = username_start + strlen("Username="); p < username_end; p++) {
                 printf("%c", *p);
             }
@@ -302,7 +302,7 @@ int main(int argc, char **argv) {
     }
 
     uint32_t gateway_ip;
-    get_default_gateway(gateway_ip);
+    get_default_gateway(interface, gateway_ip);
 
     uint32_t base_ip_net = ntohl(src_ip.sin_addr.s_addr) & ntohl(netmask.sin_addr.s_addr);
     uint32_t mask_net = ntohl(~netmask.sin_addr.s_addr);

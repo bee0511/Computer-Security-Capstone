@@ -1,25 +1,27 @@
 #include "utils.hpp"
 
-void get_default_gateway(uint32_t &gateway_ip) {
-    FILE *fp = fopen("gateway.txt", "r");
+void get_default_gateway(const char *interface, uint32_t &gateway_ip) {
+    FILE *fp = fopen("/proc/net/route", "r");
     if (fp == nullptr) {
         perror("fopen() failed");
         exit(EXIT_FAILURE);
     }
 
-    char ip_str[16];
-    if (fgets(ip_str, sizeof(ip_str), fp) == nullptr) {
-        perror("fgets() failed");
-        exit(EXIT_FAILURE);
+    char line[100], iface[10];
+    unsigned long dest, gateway;
+    while (fgets(line, sizeof(line), fp)) {
+        if (sscanf(line, "%s\t%lX\t%lX", iface, &dest, &gateway) == 3) {
+            if (strcmp(iface, interface) == 0 && dest == 0) {  // Default gateway
+                gateway_ip = gateway;
+                break;
+            }
+        }
     }
-    ip_str[strcspn(ip_str, "\n")] = 0;  // Remove newline character
-
-    // printf("Gateway IP: %s\n", ip_str);
-
-    if (inet_pton(AF_INET, ip_str, &gateway_ip) != 1) {
-        perror("inet_pton() failed");
-        exit(EXIT_FAILURE);
-    }
+    
+    // Print the default gateway IP address.
+    // struct in_addr ip_addr;
+    // ip_addr.s_addr = gateway_ip;
+    // printf("Default gateway IP address: %s\n", inet_ntoa(ip_addr));
 
     fclose(fp);
 }
