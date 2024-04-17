@@ -28,7 +28,7 @@
 #include <chrono>
 #include <thread>
 
-void get_mac_address(const char *interface, std::array<uint8_t, 6> &src_mac);
-void get_netmask(const char *interface, struct sockaddr_in &netmask);
-void get_src_IP(const char *interface, struct sockaddr_in &ipv4);
-void get_default_gateway(const char *interface, struct sockaddr_in &gateway_addr);
+void getMACAddress(const char *interface, std::array<uint8_t, 6> &src_mac);
+void getMask(const char *interface, struct sockaddr_in &netmask);
+void getSourceIP(const char *interface, struct sockaddr_in &ipv4);
+void getDefaultGateway(const char *interface, struct sockaddr_in &gateway_addr);

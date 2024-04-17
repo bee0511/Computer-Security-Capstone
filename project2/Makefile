@@ -1,6 +1,6 @@
 #compile mitm_attack.cpp with c++17
-mitm_attack: mitm_attack.cpp utils.cpp
-	g++ -std=c++17 -o mitm_attack mitm_attack.cpp utils.cpp -lpthread
+mitm_attack: mitm_attack.cpp local.cpp
+	g++ -std=c++17 -o mitm_attack mitm_attack.cpp local.cpp -lpthread
 	
 all: mitm_attack 
 

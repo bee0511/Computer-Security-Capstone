@@ -1,4 +1,4 @@
-#include "utils.hpp"
+#include "local.hpp"
 
 // Define a struct for ARP header
 struct arp_hdr {
@@ -27,3 +27,11 @@ struct LocalInfo {
 #define IP4_HDRLEN 20    // IPv4 header length
 #define ARP_HDRLEN 28    // ARP header length
 #define ARPOP_REQUEST 1  // Taken from <linux/if_arp.h>
+
+void parseARPReply(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
+bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
+void sendNonHttpPostPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info);
+void printUsernameAndPassword(uint8_t *payload, int payload_length);
+void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
+void sendSpoofedARPReply(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
+void sendARPRequest(int sd, struct LocalInfo local_info);
