@@ -1,6 +1,7 @@
 #include "utils.hpp"
 
-void get_default_gateway(const char *interface, uint32_t &gateway_ip) {
+
+void get_default_gateway(const char *interface, struct sockaddr_in &gateway_addr) {
     FILE *fp = fopen("/proc/net/route", "r");
     if (fp == nullptr) {
         perror("fopen() failed");
@@ -12,16 +13,16 @@ void get_default_gateway(const char *interface, uint32_t &gateway_ip) {
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "%s\t%lX\t%lX", iface, &dest, &gateway) == 3) {
             if (strcmp(iface, interface) == 0 && dest == 0) {  // Default gateway
-                gateway_ip = gateway;
+                gateway_addr.sin_family = AF_INET;
+                gateway_addr.sin_addr.s_addr = gateway;
                 break;
             }
         }
     }
-    
-    // Print the default gateway IP address.
-    // struct in_addr ip_addr;
-    // ip_addr.s_addr = gateway_ip;
-    // printf("Default gateway IP address: %s\n", inet_ntoa(ip_addr));
+    // Print gateway IP address.
+    // char gateway_ip[INET_ADDRSTRLEN];
+    // inet_ntop(AF_INET, &gateway_addr.sin_addr, gateway_ip, INET_ADDRSTRLEN);
+    // printf("Gateway IP address: %s\n", gateway_ip);
 
     fclose(fp);
 }

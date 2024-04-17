@@ -1,8 +1,7 @@
 #include "utils.hpp"
 
 // Define a struct for ARP header
-typedef struct _arp_hdr arp_hdr;
-struct _arp_hdr {
+struct arp_hdr {
     uint16_t htype;
     uint16_t ptype;
     uint8_t hlen;
@@ -12,6 +11,15 @@ struct _arp_hdr {
     std::array<uint8_t, 4> sender_ip;
     std::array<uint8_t, 6> target_mac;
     std::array<uint8_t, 4> target_ip;
+};
+
+// Define a struct for local info
+struct LocalInfo {
+    std::array<uint8_t, 6> src_mac;
+    struct sockaddr_in src_ip;
+    struct sockaddr_in netmask;
+    struct sockaddr_in gateway_ip;
+    struct sockaddr_ll device;
 };
 
 // Define some constants.
