@@ -8,16 +8,29 @@ void parseARPReply(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<
 
     // Check if ARP packet is a response
     if (ntohs(arphdr->opcode) == ARPOP_REPLY) {
-        // Save IP-MAC pair
-        ip_mac_pairs[arphdr->sender_ip] = arphdr->sender_mac;
-
         // If the IP address is the gateway IP, return
         if (arphdr->sender_ip[0] == (local_info.gateway_ip.sin_addr.s_addr & 0xff) &&
             arphdr->sender_ip[1] == ((local_info.gateway_ip.sin_addr.s_addr >> 8) & 0xff) &&
             arphdr->sender_ip[2] == ((local_info.gateway_ip.sin_addr.s_addr >> 16) & 0xff) &&
             arphdr->sender_ip[3] == ((local_info.gateway_ip.sin_addr.s_addr >> 24) & 0xff)) {
+            ip_mac_pairs[arphdr->sender_ip] = arphdr->sender_mac;
             return;
         }
+
+        // If the IP address is local IP, return
+        if (arphdr->sender_ip[0] == (local_info.src_ip.sin_addr.s_addr & 0xff) &&
+            arphdr->sender_ip[1] == ((local_info.src_ip.sin_addr.s_addr >> 8) & 0xff) &&
+            arphdr->sender_ip[2] == ((local_info.src_ip.sin_addr.s_addr >> 16) & 0xff) &&
+            arphdr->sender_ip[3] == ((local_info.src_ip.sin_addr.s_addr >> 24) & 0xff)) {
+            return;
+        }
+
+        // If the IP address has already in the ip_mac_pairs, return
+        if (ip_mac_pairs.find(arphdr->sender_ip) != ip_mac_pairs.end()) {
+            return;
+        }
+        // Save IP-MAC pair
+        ip_mac_pairs[arphdr->sender_ip] = arphdr->sender_mac;
 
         // Print source IP address
         printf("%d.%d.%d.%d\t\t", arphdr->sender_ip[0], arphdr->sender_ip[1], arphdr->sender_ip[2], arphdr->sender_ip[3]);
