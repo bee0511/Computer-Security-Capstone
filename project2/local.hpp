@@ -1,32 +1,14 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>           // close()
-#include <string.h>           // strcpy, memset(), and memcpy()
+#include <net/if.h>      // for struct ifreq
+#include <netinet/in.h>  // for struct sockaddr_in
+#include <sys/ioctl.h>   // for ioctl()
+#include <sys/socket.h>  // for socket(), AF_INET, SOCK_RAW, IPPROTO_RAW
+#include <sys/types.h>   // for uint8_t
+#include <unistd.h>      // for close()
 
-#include <sys/types.h>        // needed for socket(), uint8_t, uint16_t
-#include <sys/socket.h>       // needed for socket()
-#include <netinet/in.h>       // IPPROTO_RAW
-#include <netinet/ip.h>       // IP_MAXPACKET (which is 65535)
-#include <sys/ioctl.h>        // macro ioctl is defined
-#include <bits/ioctls.h>      // defines values for argument "request" of ioctl.
-#include <net/if.h>           // struct ifreq
-#include <linux/if_ether.h>   // ETH_P_ARP = 0x0806
-#include <linux/if_packet.h>  // struct sockaddr_ll (see man 7 packet)
-#include <linux/if_arp.h>
-#include <netinet/ip_icmp.h>
-#include <net/ethernet.h>
-#include <arpa/inet.h>
-#include <netinet/tcp.h>
-
-#include <errno.h>            // errno, perror()
-
-#include <algorithm>
-#include <cstdio>
-#include <vector>
-#include <map>
-#include <array>
-#include <chrono>
-#include <thread>
+#include <array>    // for std::array
+#include <cstdio>   // for fopen(), fgets(), perror()
+#include <cstdlib>  // for exit()
+#include <cstring>  // for strcmp(), memset(), memcpy()
 
 void getMACAddress(const char *interface, std::array<uint8_t, 6> &src_mac);
 void getMask(const char *interface, struct sockaddr_in &netmask);

