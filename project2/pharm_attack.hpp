@@ -6,6 +6,8 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 
+#include <csignal>
+
 struct dnshdr {
     uint16_t id;
     uint16_t flags;
