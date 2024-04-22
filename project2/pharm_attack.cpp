@@ -97,82 +97,83 @@ void send_data_udp(char *data, int len, struct NFQData *info) {
     return;
 }
 
-void send_dns_reply(unsigned char *payload, int len, int qlen, struct NFQData *info) {
-    char *data = new char[1024];
-    for (int i = 0; i < len; i++) {
-        data[i] = payload[i];
-    }
-
-    // for revising ip header total length and checksum
-    struct ip_hdr *iph = (struct ip_hdr *)data;
-    int iph_len = (((uint8_t)data[0]) & 0x0F) << 2, udph_len = 8;
-    iph->flags = 0;
-    uint tmp = iph->src_ip;
-    iph->src_ip = iph->dst_ip;
-    iph->dst_ip = tmp;
-
-    // for revising udp header length and checksum
-    struct udp_hdr *udph = (struct udp_hdr *)(data + iph_len);
-    udph->dst_port = udph->src_port;
-    udph->src_port = htons(53);
-
-    // for revising dns response content
-    struct dns_hdr *new_hdr = (struct dns_hdr *)(data + iph_len + udph_len);
-
-    new_hdr->flags = htons(0x8180);
-    // only 1 answer in reply (140.113.24.241)
-    new_hdr->ans_cnt = htons(1);
-    new_hdr->authrr_cnt = htons(0);
-    new_hdr->addrr_cnt = htons(0);
-
-    int resp_mv = iph_len + udph_len + sizeof(struct dns_hdr) + qlen;
-    struct resp_hdr *resp = (struct resp_hdr *)(data + resp_mv);
-    resp->name = htons(0xc00c);  // compress name
-    resp->type = htons(1);       // A record
-    resp->cls = htons(1);        // IN internet
-    resp->ttl = htonl(5);
-    resp->len = htons(4);
-    resp_mv += sizeof(struct resp_hdr);
-    data[resp_mv] = 140;
-    data[resp_mv + 1] = 113;
-    data[resp_mv + 2] = 24;
-    data[resp_mv + 3] = 241;
-    resp_mv += 4;
-
-    // checksum calculation
-    // reference: https://bruce690813.blogspot.com/2017/09/tcpip-checksum.html
-    udph->len = htons(resp_mv - iph_len);
-    udph->checksum = 0;
+uint16_t calTCPChecksum(struct iphdr *iph, struct udphdr *udph, int resp_mv) {
     // calculate udp checksum
     uint32_t sum = 0;
     // pseudo header
-    sum += ntohs(iph->src_ip >> 16) + ntohs(iph->src_ip & 0xFFFF);
-    sum += ntohs(iph->dst_ip >> 16) + ntohs(iph->dst_ip & 0xFFFF);
+    sum += ntohs(iph->saddr >> 16) + ntohs(iph->saddr & 0xFFFF);
+    sum += ntohs(iph->daddr >> 16) + ntohs(iph->daddr & 0xFFFF);
     sum += 0x0011;  // UDP
-    sum += (resp_mv - iph_len);
+    sum += (resp_mv - iph->ihl * 4);
     auto buf = reinterpret_cast<const uint16_t *>(udph);
-    int len_buf = (resp_mv - iph_len) % 2 ? (resp_mv - iph_len) / 2 + 1 : (resp_mv - iph_len) / 2;
+    int len_buf = (resp_mv - iph->ihl * 4) % 2 ? (resp_mv - iph->ihl * 4) / 2 + 1 : (resp_mv - iph->ihl * 4) / 2;
     for (int i = 0; i < len_buf; i++) {
         sum += ntohs(buf[i]);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    udph->checksum = ~htons(sum);
+    return ~htons(sum);
+}
 
-    // calculate ip checksum
-    iph->tlen = htons(resp_mv);
-    iph->checksum = 0;
-    sum = 0;
-    buf = reinterpret_cast<const uint16_t *>(iph);
+uint16_t calIPChecksum(struct iphdr *iph) {
+    uint32_t sum = 0;
+    auto buf = reinterpret_cast<const uint16_t *>(iph);
     for (int i = 0; i < iph->ihl * 2; i++) {
         sum += ntohs(buf[i] & 0xFFFF);
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    iph->checksum = ~htons(sum);
+    return ~htons(sum);
+}
 
+void sendDNSReply(unsigned char *payload, int len, int qlen, struct NFQData *info) {
+    char *data = new char[1024];
+    std::copy(payload, payload + len, data);
+
+    struct iphdr *iph = (struct iphdr *)data;
+    int iph_len = iph->ihl * 4;
+    int udph_len = sizeof(struct udphdr);
+
+    // change the source and destination ip
+    uint32_t temp = iph->daddr;
+    iph->daddr = iph->saddr;
+    iph->saddr = temp;
+    iph->frag_off = 0;
+
+    struct udphdr *udph = (struct udphdr *)(data + iph_len);
+    udph->dest = udph->source;
+    udph->source = htons(53);
+
+    struct dnshdr *dnsh = (struct dnshdr *)(data + iph_len + udph_len);
+
+    dnsh->flags = htons(0x8180);
+    dnsh->ans_cnt = htons(1);  // one answer only (140.113.24.241)
+    dnsh->authrr_cnt = htons(0);
+    dnsh->addrr_cnt = htons(0);
+
+    int resp_mv = iph_len + udph_len + sizeof(struct dnshdr) + qlen;
+    struct resphdr *resp = (struct resphdr *)(data + resp_mv);
+    resp->name = htons(0xc00c);  // compress name
+    resp->type = htons(1);       // A record
+    resp->cls = htons(1);        // IN internet
+    resp->ttl = htonl(5);
+    resp->len = htons(4);
+    resp_mv += sizeof(struct resphdr);
+    data[resp_mv] = 140;
+    data[resp_mv + 1] = 113;
+    data[resp_mv + 2] = 24;
+    data[resp_mv + 3] = 241;
+    resp_mv += 4;
+
+    udph->len = htons(resp_mv - iph_len);
+    udph->check = 0;
+    udph->check = calTCPChecksum(iph, udph, resp_mv);
+
+    iph->tot_len = htons(resp_mv);
+    iph->check = 0;
+    iph->check = calIPChecksum(iph);
     // send data out
     send_data_udp(data, resp_mv, info);
 }
@@ -200,9 +201,9 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
     }
 }
 
-std::string parse_dns_query(const unsigned char *packet, int dns_start, int &dns_name_length) {
+std::string parseDNSQuery(const unsigned char *packet, int dns_start, int &dns_name_length) {
     std::string dns_name;
-    int dns_name_position = dns_start + sizeof(dns_hdr);
+    int dns_name_position = dns_start + sizeof(dnshdr);
     dns_name_length = 5;  // Include qry.type, qry.class, and final 0 in qname
 
     while (packet[dns_name_position] != 0) {
@@ -244,20 +245,19 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 
     int iph_len = iph->ihl * 4;
     int udph_len = sizeof(struct udphdr);
-    int dport = ntohs(udph->dest);
 
-    if (dport != 53) {
+    if (ntohs(udph->dest) != 53) {
         return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
     }
     int dns_name_length;
-    std::string dns_name = parse_dns_query(packet, iph_len + udph_len, dns_name_length);
+    std::string dns_name = parseDNSQuery(packet, iph_len + udph_len, dns_name_length);
     // printf("dns_name: %s\n", dns_name.c_str());
 
     if (dns_name != "wwwnycuedutw") {
         return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
     }
 
-    send_dns_reply(packet, len, dns_name_length, nfq_data);
+    sendDNSReply(packet, len, dns_name_length, nfq_data);
     return nfq_set_verdict(qh, ph->packet_id, NF_DROP, 0, NULL);
 }
 
@@ -374,6 +374,7 @@ int main(int argc, char **argv) {
     system(cmd);
     system("iptables -A FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 0");
     system("iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0");
+    // system("iptables -A FORWARD -p icmp -j NFQUEUE --queue-num 0");
 
     // Start the NFQHandler
     NFQHandler(local_info, ip_mac_pairs);

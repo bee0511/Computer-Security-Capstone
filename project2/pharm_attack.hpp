@@ -15,17 +15,16 @@ struct NFQData{
   std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs;
 };
 
-struct dns_hdr {
-  uint16_t id;
-  uint16_t flags;
-  uint16_t qs_cnt;
-  uint16_t ans_cnt;
-  uint16_t authrr_cnt;
-  uint16_t addrr_cnt;
+struct dnshdr {
+  uint16_t id;        // identification number
+  uint16_t flags;     // DNS flags
+  uint16_t qd_count;  // number of question entries
+  uint16_t ans_cnt;   // number of answer entries
+  uint16_t authrr_cnt;// number of authority entries
+  uint16_t addrr_cnt; // number of resource entries
 };
 
-
-struct __attribute__((packed, aligned(2))) resp_hdr {
+struct __attribute__((packed, aligned(2))) resphdr {
   uint16_t name;
   uint16_t type;
   uint16_t cls; // class
@@ -44,12 +43,6 @@ struct __attribute__((packed, aligned(1))) ip_hdr {
   uint16_t checksum;
   uint32_t src_ip;
   uint32_t dst_ip;
-};
-struct udp_hdr {
-  uint16_t src_port;
-  uint16_t dst_port;
-  uint16_t len;
-  uint16_t checksum;
 };
 
 // Define some constants.
