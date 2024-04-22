@@ -9,6 +9,24 @@ void handle_sigint(int sig) {
     system("sysctl net.ipv4.ip_forward=0 > /dev/null");
     exit(0);
 }
+void setup_forwarding(const char* interface, const char* gateway_ip) {
+    char command[100];
+
+    // Enable IP forwarding
+    system("sysctl net.ipv4.ip_forward=1 > /dev/null");
+
+    // Flush existing rules
+    system("iptables -F");
+    system("iptables -F -t nat");
+
+    // Setup masquerade for outgoing packets on the specified interface
+    sprintf(command, "iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", interface);
+    system(command);
+
+    // Forward packets with destination port 53 to NFQUEUE
+    system("iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0");
+}
+
 void sendUDP(char *data, int len, struct NFQData *info) {
     int sd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
     if (sd < 0) {
@@ -50,6 +68,7 @@ void sendUDP(char *data, int len, struct NFQData *info) {
     if (sendto(sd, packet_buffer.data(), len + ETH2_HEADER_LEN, 0, (struct sockaddr *)&info->local_info.device, sizeof(struct sockaddr_ll)) < 0) {
         perror("sendto()");
     }
+    printf("Sent UDP packet\n");
     close(sd);
 
     return;
@@ -203,19 +222,19 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     int iph_len = iph->ihl * 4;
     int udph_len = sizeof(struct udphdr);
 
-    if (ntohs(udph->dest) != 53) {
-        return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
+    if (ntohs(udph->dest) != 53 || iph->protocol != IPPROTO_UDP) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
     int dns_name_length;
     std::string dns_name = parseDNSQuery(packet, iph_len + udph_len, dns_name_length);
-    // printf("dns_name: %s\n", dns_name.c_str());
+    printf("dns_name: %s\n", dns_name.c_str());
 
     if (dns_name != "wwwnycuedutw") {
-        return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
 
     sendDNSReply(packet, len, dns_name_length, nfq_data);
-    return nfq_set_verdict(qh, ph->packet_id, NF_DROP, 0, NULL);
+    return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
 }
 
 void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs) {
@@ -331,15 +350,8 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, handle_sigint);
 
-    system("sysctl net.ipv4.ip_forward=1 > /dev/null");
-    system("iptables -F");
-    system("iptables -F -t nat");
-    char cmd[100];
-    sprintf(cmd, "iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", interface);
-    system(cmd);
-    system("iptables -A FORWARD -p udp --sport 53 -j NFQUEUE --queue-num 0");
-    system("iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0");
-    // system("iptables -A FORWARD -p icmp -j NFQUEUE --queue-num 0");
+    // Setup IP forwarding
+    setup_forwarding(interface, inet_ntoa(local_info.gateway_ip.sin_addr));
 
     // Start the NFQHandler
     NFQHandler(local_info, ip_mac_pairs);
