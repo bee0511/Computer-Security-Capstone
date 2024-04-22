@@ -9,90 +9,48 @@ void handle_sigint(int sig) {
     system("sysctl net.ipv4.ip_forward=0 > /dev/null");
     exit(0);
 }
-
-void send_data_udp(char *data, int len, struct NFQData *info) {
-    // raw socket
-    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
-    // int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
+void sendUDP(char *data, int len, struct NFQData *info) {
+    int sd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
+    if (sd < 0) {
         perror("socket()");
         return;
     }
 
-    uint32_t my_ip = info->local_info.src_ip.sin_addr.s_addr;
-    int ifidx = info->local_info.device.sll_ifindex;
-    std::array<uint8_t, 6> src_mac = info->local_info.src_mac;
-    unsigned char my_mac[6];
-    std::copy(src_mac.begin(), src_mac.end(), my_mac);
-    // dump ifidx, src_mac, my_ip
-    printf("ifidx: %d\n", ifidx);
-    printf("src_mac: ");
-    for (int i = 0; i < 6; i++) {
-        printf("%02x ", my_mac[i]);
-    }
-    printf("\n");
-    printf("my_ip: %s\n", inet_ntoa(info->local_info.src_ip.sin_addr));
+    // Create a buffer for the packet
+    std::vector<char> packet_buffer(1024, 0);
+    struct ethhdr *eth = reinterpret_cast<struct ethhdr *>(packet_buffer.data());
 
-    char *sendbuf = new char[1024];
-    memset(sendbuf, 0, 1024);
-    struct ethhdr *eth = (struct ethhdr *)sendbuf;
+    // Copy source MAC address to the packet
+    std::copy(info->local_info.src_mac.begin(), info->local_info.src_mac.end(), eth->h_source);
+
+    // Extract the destination IP from the data
+    struct iphdr *iph = reinterpret_cast<struct iphdr *>(data);
     std::array<uint8_t, 4> dest_ip_array;
-    for (int i = 0; i < 4; i++) {
-        dest_ip_array[i] = data[16 + i];
-    }
+    memcpy(dest_ip_array.data(), &iph->daddr, 4);
 
-    memcpy(eth->h_source, my_mac, MAC_LENGTH);
-
-    unsigned char *dest_mac = new unsigned char[6];
+    // Find the destination MAC address and copy it to the packet
     auto it = info->ip_mac_pairs.find(dest_ip_array);
     if (it != info->ip_mac_pairs.end()) {
-        std::copy(it->second.begin(), it->second.end(), dest_mac);
-        // Now dest_mac contains the MAC address for dest_ip_array
+        std::copy(it->second.begin(), it->second.end(), eth->h_dest);
     } else {
-        // Handle the case where dest_ip_array is not in the map
-        // Print destination IP
         printf("Destination IP: %d.%d.%d.%d not found in map\n", dest_ip_array[0], dest_ip_array[1], dest_ip_array[2], dest_ip_array[3]);
         return;
     }
-    memcpy(eth->h_dest, dest_mac, MAC_LENGTH);
+
+    // Set the protocol field in the Ethernet header
     eth->h_proto = htons(ETH_P_IP);
 
-    for (int i = ETH2_HEADER_LEN; i < len + ETH2_HEADER_LEN; i++) {
-        sendbuf[i] = data[i - ETH2_HEADER_LEN];
-    }
+    // Copy the rest of the packet data
+    std::copy(data, data + len, packet_buffer.begin() + ETH2_HEADER_LEN);
 
-    // dump
-    // for(int i=0;i<len+ETH2_HEADER_LEN;i++){
-    //     cout << hex << (unsigned)sendbuf[i] << ' ';
-    //     if(i%16 == 15) cout << '\n';
-    // }
-    // cout << '\n';
-
-    struct sockaddr_ll sll;
-    memset(&sll, 0, sizeof(struct sockaddr_ll));
-    sll.sll_family = AF_PACKET;
-    sll.sll_ifindex = ifidx;
-    if (bind(fd, (struct sockaddr *)&sll, sizeof(struct sockaddr_ll)) < 0) {
+    if (bind(sd, (struct sockaddr *)&info->local_info.device, sizeof(struct sockaddr_ll)) < 0) {
         perror("bind");
     }
 
-    struct sockaddr_ll socket_address;
-    socket_address.sll_family = AF_PACKET;
-    socket_address.sll_protocol = htons(ETH_P_IP);
-    socket_address.sll_ifindex = ifidx;
-    socket_address.sll_hatype = htons(ARPHRD_ETHER);
-    socket_address.sll_pkttype = (PACKET_BROADCAST);
-    socket_address.sll_halen = MAC_LENGTH;
-    socket_address.sll_addr[6] = 0x00;
-    socket_address.sll_addr[7] = 0x00;
-    memcpy(socket_address.sll_addr, my_mac, MAC_LENGTH);
-
-    if (sendto(fd, sendbuf, len + ETH2_HEADER_LEN, 0, (struct sockaddr *)&socket_address, sizeof(socket_address)) < 0) {
+    if (sendto(sd, packet_buffer.data(), len + ETH2_HEADER_LEN, 0, (struct sockaddr *)&info->local_info.device, sizeof(struct sockaddr_ll)) < 0) {
         perror("sendto()");
     }
-    close(fd);
-    delete[] sendbuf;
-    delete[] data;
+    close(sd);
 
     return;
 }
@@ -174,8 +132,7 @@ void sendDNSReply(unsigned char *payload, int len, int qlen, struct NFQData *inf
     iph->tot_len = htons(resp_mv);
     iph->check = 0;
     iph->check = calIPChecksum(iph);
-    // send data out
-    send_data_udp(data, resp_mv, info);
+    sendUDP(data, resp_mv, info);
 }
 
 // Function to handle receiving responses
@@ -265,7 +222,7 @@ void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, st
     struct nfq_handle *h;
     struct nfq_q_handle *qh;
     struct nfnl_handle *nh;
-    int fd;
+    int sd;
     int rv;
     char buf[4096] __attribute__((aligned));
 
@@ -295,8 +252,8 @@ void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, st
         fprintf(stderr, "can't set packet_copy mode\n");
         exit(1);
     }
-    fd = nfq_fd(h);
-    while ((rv = recv(fd, buf, sizeof(buf), 0)) && rv >= 0) {
+    sd = nfq_fd(h);
+    while ((rv = recv(sd, buf, sizeof(buf), 0)) && rv >= 0) {
         nfq_handle_packet(h, buf, rv);
     }
     nfq_destroy_queue(qh);
@@ -336,6 +293,14 @@ int main(int argc, char **argv) {
         perror("if_nametoindex() failed to obtain interface index");
         exit(EXIT_FAILURE);
     }
+    local_info.device.sll_family = AF_PACKET;
+    local_info.device.sll_protocol = htons(ETH_P_IP);
+    local_info.device.sll_hatype = htons(ARPHRD_ETHER);
+    local_info.device.sll_pkttype = (PACKET_BROADCAST);
+    local_info.device.sll_halen = MAC_LENGTH;
+    local_info.device.sll_addr[6] = 0x00;
+    local_info.device.sll_addr[7] = 0x00;
+    memcpy(local_info.device.sll_addr, local_info.src_mac.data(), MAC_LENGTH);
 #ifdef INFO
     printf("src_ip: %s\n", inet_ntoa(local_info.src_ip.sin_addr));
     printf("src_mac: %02x:%02x:%02x:%02x:%02x:%02x\n", local_info.src_mac[0], local_info.src_mac[1], local_info.src_mac[2], local_info.src_mac[3], local_info.src_mac[4], local_info.src_mac[5]);
