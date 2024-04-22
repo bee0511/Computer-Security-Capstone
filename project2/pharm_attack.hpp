@@ -32,21 +32,8 @@ struct __attribute__((packed, aligned(2))) resphdr {
   uint16_t len;
 };
 
-struct __attribute__((packed, aligned(1))) ip_hdr {
-  uint8_t ihl:4, ver:4;
-  uint8_t tos;
-  uint16_t tlen;
-  uint16_t id;
-  uint16_t flags;
-  uint8_t ttl;
-  uint8_t proto;
-  uint16_t checksum;
-  uint32_t src_ip;
-  uint32_t dst_ip;
-};
 
 // Define some constants.
-#define IP4_HDRLEN 20    // IPv4 header length
 #define ETH2_HEADER_LEN 14
 
 bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);

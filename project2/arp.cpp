@@ -145,3 +145,25 @@ void sendARPRequest(int sd, struct LocalInfo local_info) {
         }
     }
 }
+
+void receiveARPReply(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info) {
+    uint8_t buffer[IP_MAXPACKET];
+    struct sockaddr saddr;
+    int saddr_len = sizeof(saddr);
+
+    while (true) {
+        // Receive packet
+        int bytes = recvfrom(sd, buffer, IP_MAXPACKET, 0, &saddr, (socklen_t *)&saddr_len);
+        if (bytes < 0) {
+            perror("recvfrom() failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Check if packet is an ARP packet
+        if (buffer[12] == ETH_P_ARP / 256 && buffer[13] == ETH_P_ARP % 256) {
+            parseARPReply(buffer, ip_mac_pairs, local_info);
+        }
+        memset(buffer, 0, IP_MAXPACKET);
+        continue;
+    }
+}
