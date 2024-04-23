@@ -27,6 +27,57 @@ void setup_forwarding(const char *interface, const char *gateway_ip) {
     system("iptables -A FORWARD -p udp --dport 53 -j NFQUEUE --queue-num 0");
 }
 
+uint16_t calTCPChecksum(struct iphdr *iph, struct udphdr *udph, int resp_mv) {
+    // calculate udp checksum
+    uint32_t sum = 0;
+    // pseudo header
+    sum += ntohs(iph->saddr >> 16) + ntohs(iph->saddr & 0xFFFF);
+    sum += ntohs(iph->daddr >> 16) + ntohs(iph->daddr & 0xFFFF);
+    sum += 0x0011;  // UDP
+    sum += (resp_mv - iph->ihl * 4);
+    auto buf = reinterpret_cast<const uint16_t *>(udph);
+    int len_buf = (resp_mv - iph->ihl * 4) % 2 ? (resp_mv - iph->ihl * 4) / 2 + 1 : (resp_mv - iph->ihl * 4) / 2;
+    for (int i = 0; i < len_buf; i++) {
+        sum += ntohs(buf[i]);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~htons(sum);
+}
+
+uint16_t calIPChecksum(struct iphdr *iph) {
+    uint32_t sum = 0;
+    auto buf = reinterpret_cast<const uint16_t *>(iph);
+    for (int i = 0; i < iph->ihl * 2; i++) {
+        sum += ntohs(buf[i] & 0xFFFF);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~htons(sum);
+}
+
+std::string parseDNSQuery(const unsigned char *packet, int dns_start, int &dns_name_length) {
+    std::string dns_name;
+    int dns_name_position = dns_start + sizeof(dnshdr);
+    dns_name_length = 5;  // Include qry.type, qry.class, and final 0 in qname
+
+    while (packet[dns_name_position] != 0) {
+        int label_length = packet[dns_name_position];
+        dns_name_length += label_length + 1;
+
+        for (int i = 0; i < label_length; i++) {
+            dns_name_position++;
+            dns_name += packet[dns_name_position];
+        }
+
+        dns_name_position++;
+    }
+
+    return dns_name;
+}
+
 void sendUDP(char *data, int len, struct NFQData *info) {
     int sd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
     if (sd < 0) {
@@ -71,37 +122,6 @@ void sendUDP(char *data, int len, struct NFQData *info) {
     close(sd);
 
     return;
-}
-
-uint16_t calTCPChecksum(struct iphdr *iph, struct udphdr *udph, int resp_mv) {
-    // calculate udp checksum
-    uint32_t sum = 0;
-    // pseudo header
-    sum += ntohs(iph->saddr >> 16) + ntohs(iph->saddr & 0xFFFF);
-    sum += ntohs(iph->daddr >> 16) + ntohs(iph->daddr & 0xFFFF);
-    sum += 0x0011;  // UDP
-    sum += (resp_mv - iph->ihl * 4);
-    auto buf = reinterpret_cast<const uint16_t *>(udph);
-    int len_buf = (resp_mv - iph->ihl * 4) % 2 ? (resp_mv - iph->ihl * 4) / 2 + 1 : (resp_mv - iph->ihl * 4) / 2;
-    for (int i = 0; i < len_buf; i++) {
-        sum += ntohs(buf[i]);
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return ~htons(sum);
-}
-
-uint16_t calIPChecksum(struct iphdr *iph) {
-    uint32_t sum = 0;
-    auto buf = reinterpret_cast<const uint16_t *>(iph);
-    for (int i = 0; i < iph->ihl * 2; i++) {
-        sum += ntohs(buf[i] & 0xFFFF);
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return ~htons(sum);
 }
 
 void sendDNSReply(unsigned char *payload, int len, int qlen, struct NFQData *info) {
@@ -151,27 +171,6 @@ void sendDNSReply(unsigned char *payload, int len, int qlen, struct NFQData *inf
     iph->check = 0;
     iph->check = calIPChecksum(iph);
     sendUDP(data, resp_mv, info);
-}
-
-
-std::string parseDNSQuery(const unsigned char *packet, int dns_start, int &dns_name_length) {
-    std::string dns_name;
-    int dns_name_position = dns_start + sizeof(dnshdr);
-    dns_name_length = 5;  // Include qry.type, qry.class, and final 0 in qname
-
-    while (packet[dns_name_position] != 0) {
-        int label_length = packet[dns_name_position];
-        dns_name_length += label_length + 1;
-
-        for (int i = 0; i < label_length; i++) {
-            dns_name_position++;
-            dns_name += packet[dns_name_position];
-        }
-
-        dns_name_position++;
-    }
-
-    return dns_name;
 }
 
 static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
