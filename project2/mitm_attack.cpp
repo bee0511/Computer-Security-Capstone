@@ -9,7 +9,7 @@ void handle_sigint(int sig) {
     exit(0);
 }
 
-void setup_forwarding(const char *interface, const char *gateway_ip) {
+void setup_forwarding(const char *interface) {
     char command[100];
 
     // Enable IP forwarding
@@ -207,7 +207,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sigint);
 
     // Setup IP forwarding
-    setup_forwarding(interface, inet_ntoa(local_info.gateway_ip.sin_addr));
+    setup_forwarding(interface);
 
     // Start the NFQHandler
     NFQHandler(local_info, ip_mac_pairs);

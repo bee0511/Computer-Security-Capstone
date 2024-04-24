@@ -3,7 +3,6 @@
 #include <arpa/inet.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
 #include <linux/netfilter.h>
-#include <netinet/tcp.h>
 #include <netinet/udp.h>
 
 #include <csignal>
@@ -32,10 +31,14 @@ struct __attribute__((packed, aligned(2))) resphdr {
   uint16_t len;
 };
 
-
-// Define some constants.
 #define ETH2_HEADER_LEN 14
 
-bool modifyPacket(uint8_t *buffer, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
-void sendMarkedPacket(uint8_t *buffer, int bytes, int sd, struct LocalInfo local_info);
-void receiveHandler(int sd, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> &ip_mac_pairs, struct LocalInfo local_info);
+void handle_sigint(int sig);
+void setup_forwarding(const char *interface);
+
+uint16_t calTCPChecksum(struct iphdr *iph, struct udphdr *udph, int resp_mv);
+uint16_t calIPChecksum(struct iphdr *iph);
+std::string parseDNSQuery(const unsigned char *packet, int dns_start, int &dns_name_length);
+void sendDNSReply(char *data, int len, struct NFQData *info);
+static int handleNFQPacket(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *data);
+void NFQHandler(struct LocalInfo local_info, std::map<std::array<uint8_t, 4>, std::array<uint8_t, 6>> ip_mac_pairs);
