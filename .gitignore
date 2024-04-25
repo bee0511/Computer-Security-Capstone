@@ -5,5 +5,4 @@
 
 *.txt
 .vscode
-110550*
-2024*
+!Makefile
