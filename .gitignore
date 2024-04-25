@@ -6,3 +6,8 @@
 *.txt
 .vscode
 !Makefile
+!crack_attack
+!attack_server
+!virus
+!worm
+!get_worm

