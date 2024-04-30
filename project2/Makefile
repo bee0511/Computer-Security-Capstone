@@ -1,12 +1,24 @@
-all: mitm_attack pharm_attack
+CXX = g++
+CXXFLAGS = -std=c++17
+LDFLAGS = -lpthread -lnetfilter_queue
+SRCDIR = src
+OBJDIR = obj
+BINDIR = .
 
-#compile mitm_attack.cpp with c++17
-mitm_attack: mitm_attack.cpp local.cpp arp.cpp
-	g++ -std=c++17 -o mitm_attack mitm_attack.cpp local.cpp arp.cpp -lpthread -lnetfilter_queue
+TARGETS = mitm_attack pharm_attack
+COMMON_OBJS = local.o arp.o
+OBJECTS = $(addprefix $(OBJDIR)/, $(addsuffix .o, $(TARGETS)) $(COMMON_OBJS))
 
-#compile pharm_attack.cpp with c++17 and set iptables rule
-pharm_attack: pharm_attack.cpp local.cpp arp.cpp
-	g++ -std=c++17 -o pharm_attack pharm_attack.cpp local.cpp arp.cpp -lpthread -lnetfilter_queue
-	
+all: $(TARGETS)
+
+$(OBJDIR)/%.o: $(SRCDIR)/%.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+mitm_attack: $(OBJDIR)/mitm_attack.o $(addprefix $(OBJDIR)/, $(COMMON_OBJS))
+	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $(BINDIR)/$@
+
+pharm_attack: $(OBJDIR)/pharm_attack.o $(addprefix $(OBJDIR)/, $(COMMON_OBJS))
+	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $(BINDIR)/$@
+
 clean:
-	rm -f mitm_attack pharm_attack
+	rm -f $(OBJECTS) $(addprefix $(BINDIR)/, $(TARGETS))
