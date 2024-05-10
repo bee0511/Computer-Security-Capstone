@@ -9,7 +9,10 @@ TARGETS = mitm_attack pharm_attack
 COMMON_OBJS = local.o arp.o
 OBJECTS = $(addprefix $(OBJDIR)/, $(addsuffix .o, $(TARGETS)) $(COMMON_OBJS))
 
-all: $(TARGETS)
+all: $(OBJDIR) $(TARGETS)
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -21,4 +24,4 @@ pharm_attack: $(OBJDIR)/pharm_attack.o $(addprefix $(OBJDIR)/, $(COMMON_OBJS))
 	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $(BINDIR)/$@
 
 clean:
-	rm -f $(OBJECTS) $(addprefix $(BINDIR)/, $(TARGETS))
+	rm -rf $(OBJECTS) $(addprefix $(BINDIR)/, $(TARGETS)) $(OBJDIR)
