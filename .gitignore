@@ -8,6 +8,6 @@
 .vscode
 !Makefile
 !crack_attack
-!attack_server
+!attacker_server
 !virus
 !worm

@@ -4,7 +4,7 @@ import paramiko
 import time
 import sys
 
-def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
+def crack_ssh_passwd(victim_ip:str, username:str):
     '''
     Cracking the victim’s password by launching a dictionary attack
     Crack the SSH password of the victim based on the personal information
@@ -22,7 +22,7 @@ def crack_ssh_passwd(victim_ip:str, username:str) -> paramiko.SSHClient:
                     return crack_result
                     
             
-def crack(target_ip:str, user:str, password:str) -> paramiko.SSHClient:
+def crack(target_ip:str, user:str, password:str):
     '''
     Utilize paramiko to build SSH connection with the client while catching exceptions
     '''
