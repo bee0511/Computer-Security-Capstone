@@ -4,7 +4,6 @@
 !*.*
 
 *.o
-*.txt
 .vscode
 !Makefile
 !crack_attack
