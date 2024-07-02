@@ -32,7 +32,7 @@ This project delves into network security vulnerabilities, focusing on ARP spoof
 
 ## About The Project
 
-This project is a comprehensive exploration of network security vulnerabilities and attack vectors, specifically focusing on ARP spoofing, Man-In-The-Middle (MITM), and pharming attacks. Implemented in C++, the project showcases how these attacks can be conducted and provides insights into their mechanisms and potential countermeasures.
+This project is a comprehensive exploration of network security vulnerabilities and attack vectors, specifically focusing on ARP spoofing, Man-In-The-Middle (MITM), and pharming attacks. Implemented in C++, the project showcases how these attacks can be conducted and provides insights into their mechanisms.
 
 ### Key Components
 
