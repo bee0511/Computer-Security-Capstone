@@ -20,10 +20,9 @@ This project delves into network security vulnerabilities, focusing on ARP spoof
     </li>
     <li><a href="#usage">Usage</a></li>
     <li><a href="#verification-steps">Verification Steps</a></li>
-    <li><a href="#environment">Environment</a></li>
     <ul>
-        <li><a href="#ip-address">IP Address</a></li>
-        <li><a href="#configuration">Configuration</a></li>
+        <li><a href="#mitm-attack">Man in the Middle Attack</a></li>
+        <li><a href="#pharming-attack">Pharming Attack</a></li>
     </ul>
     <li><a href="#disclaimer">Disclaimer</a></li>
   </ol>
